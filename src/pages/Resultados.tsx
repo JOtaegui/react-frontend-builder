@@ -1,16 +1,17 @@
 import { useState } from "react";
-import { useParams, Navigate } from "react-router-dom";
+import { useParams, useNavigate, Navigate } from "react-router-dom";
 import { Layout } from "@/components/Layout";
 import { RiskBadge } from "@/components/RiskBadge";
 import { SearchFilter } from "@/components/SearchFilter";
-import { getSearchById } from "@/data/mockData";
+import { getSearchById, mockSearches } from "@/data/mockData";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Progress } from "@/components/ui/progress";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { FileSearch, ShieldAlert, BarChart3, Clock, Database, AlertTriangle, Eye } from "lucide-react";
+import { FileSearch, ShieldAlert, BarChart3, Clock, Database, AlertTriangle, Eye, Users, Ghost, Flame } from "lucide-react";
 
 export default function Resultados() {
   const { id } = useParams();
+  const navigate = useNavigate();
   const [filter, setFilter] = useState("");
   const data = getSearchById(id || "");
 
@@ -25,7 +26,7 @@ export default function Resultados() {
   );
 
   const riskColor =
-    data.puntajeRiesgo >= 75 ? "text-red-500" : data.puntajeRiesgo >= 50 ? "text-orange-500" : data.puntajeRiesgo >= 25 ? "text-yellow-500" : "text-green-500";
+    data.puntajeRiesgo >= 75 ? "text-destructive" : data.puntajeRiesgo >= 50 ? "text-orange-500" : data.puntajeRiesgo >= 25 ? "text-yellow-500" : "text-primary";
 
   return (
     <Layout>
@@ -42,6 +43,47 @@ export default function Resultados() {
             <SearchFilter value={filter} onChange={setFilter} placeholder="Filtrar resultados..." />
           </div>
         </div>
+
+        {/* Searches List */}
+        <Card>
+          <CardHeader className="pb-3">
+            <CardTitle className="flex items-center gap-2 text-base">
+              <Users className="h-4 w-4" />
+              Búsquedas
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            {mockSearches.length === 0 ? (
+              <div className="flex flex-col items-center py-6 text-muted-foreground">
+                <Ghost className="h-10 w-10 mb-2 opacity-40" />
+                <p className="text-sm">Aún no hay resultados</p>
+              </div>
+            ) : (
+              <div className="flex gap-2 flex-wrap">
+                {mockSearches.map((s) => (
+                  <button
+                    key={s.id}
+                    onClick={() => navigate(`/resultados/${s.id}`)}
+                    className={`flex items-center gap-2 px-3 py-2 rounded-lg text-sm border transition-colors ${
+                      s.id === id
+                        ? "bg-primary/10 border-primary/30 text-primary font-medium"
+                        : "bg-card border-border hover:bg-muted/50 text-foreground"
+                    }`}
+                  >
+                    <Flame className={`h-3.5 w-3.5 ${
+                      s.riesgo === "Crítico" ? "text-destructive" :
+                      s.riesgo === "Alto" ? "text-orange-500" :
+                      s.riesgo === "Medio" ? "text-yellow-500" :
+                      "text-primary"
+                    }`} />
+                    <span className="truncate max-w-[150px]">{s.nombre.split(" ").slice(0, 2).join(" ")}</span>
+                    <RiskBadge level={s.riesgo} />
+                  </button>
+                ))}
+              </div>
+            )}
+          </CardContent>
+        </Card>
 
         {/* Risk Index */}
         <Card>
@@ -159,7 +201,7 @@ export default function Resultados() {
                     <p className="text-sm font-semibold">{t.evento}</p>
                     <p className="text-xs text-muted-foreground">{t.fecha} · {t.fuente}</p>
                     <p className="text-xs text-muted-foreground">Datos: {t.datosExpuestos}</p>
-                    <span className={`text-xs ${t.estado === "Sin resolver" ? "text-red-400" : "text-yellow-400"}`}>{t.estado}</span>
+                    <span className={`text-xs ${t.estado === "Sin resolver" ? "text-destructive" : "text-yellow-400"}`}>{t.estado}</span>
                   </div>
                 </div>
               ))}
