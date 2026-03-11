@@ -63,7 +63,7 @@ export function AppSidebar() {
         </SidebarGroup>
 
         {/* Searches list */}
-        <SidebarGroup defaultOpen>
+        <SidebarGroup>
           <SidebarGroupLabel>
             <UserSearch className="h-3.5 w-3.5 mr-1.5" />
             Búsquedas
