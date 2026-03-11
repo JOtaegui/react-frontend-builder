@@ -105,7 +105,7 @@ export function AppSidebar() {
 
         {/* Sub-pages for active search */}
         {activeId && (
-          <SidebarGroup defaultOpen>
+          <SidebarGroup>
             <SidebarGroupLabel>Análisis</SidebarGroupLabel>
             <SidebarGroupContent>
               <SidebarMenu>
