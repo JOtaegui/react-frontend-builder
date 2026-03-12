@@ -1,7 +1,6 @@
 import { useParams, useLocation } from "react-router-dom";
-import { Fingerprint, Home, BarChart3, FileSearch, ClipboardCheck, Ghost, UserSearch } from "lucide-react";
+import { Fingerprint, Home, BarChart3, FileSearch, ClipboardCheck } from "lucide-react";
 import { NavLink } from "@/components/NavLink";
-import { mockSearches } from "@/data/mockData";
 import {
   Sidebar,
   SidebarContent,
