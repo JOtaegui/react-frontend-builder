@@ -1,5 +1,5 @@
 import { useParams, useLocation } from "react-router-dom";
-import { Fingerprint, Home, BarChart3, FileSearch, ClipboardCheck } from "lucide-react";
+import { Fingerprint, Home, BarChart3, FileSearch, ClipboardCheck, Search } from "lucide-react";
 import { NavLink } from "@/components/NavLink";
 import {
   Sidebar,
@@ -20,13 +20,15 @@ export function AppSidebar() {
   const { id } = useParams();
   const location = useLocation();
 
-  // Determine active id from any route
   const activeId = id || location.pathname.match(/\/(resultados|hallazgos|plan)\/(\w+)/)?.[2];
 
+  // Nombre desde query param si estamos en /dorks
+  const dorksNombre = new URLSearchParams(location.search).get("nombre") ?? "";
+
   const subPages = [
-    { title: "Resultados", base: "resultados", icon: BarChart3 },
-    { title: "Hallazgos", base: "hallazgos", icon: FileSearch },
-    { title: "Plan de Acción", base: "plan", icon: ClipboardCheck },
+    { title: "Resultados",    base: "resultados", icon: BarChart3 },
+    { title: "Hallazgos",     base: "hallazgos",  icon: FileSearch },
+    { title: "Plan de Acción",base: "plan",        icon: ClipboardCheck },
   ];
 
   return (
@@ -44,11 +46,12 @@ export function AppSidebar() {
       </SidebarHeader>
 
       <SidebarContent>
-        {/* Main nav */}
+        {/* ── General ───────────────────────────────────────────────────── */}
         <SidebarGroup>
           <SidebarGroupLabel>General</SidebarGroupLabel>
           <SidebarGroupContent>
             <SidebarMenu>
+
               <SidebarMenuItem>
                 <SidebarMenuButton asChild>
                   <NavLink to="/" end className="hover:bg-muted/50" activeClassName="bg-primary/10 text-primary font-medium">
@@ -57,12 +60,25 @@ export function AppSidebar() {
                   </NavLink>
                 </SidebarMenuButton>
               </SidebarMenuItem>
+
+              <SidebarMenuItem>
+                <SidebarMenuButton asChild>
+                  <NavLink
+                    to={dorksNombre ? `/dorks?nombre=${encodeURIComponent(dorksNombre)}` : "/dorks"}
+                    className="hover:bg-muted/50"
+                    activeClassName="bg-primary/10 text-primary font-medium"
+                  >
+                    <Search className="mr-2 h-4 w-4" />
+                    {!collapsed && <span>Dorks</span>}
+                  </NavLink>
+                </SidebarMenuButton>
+              </SidebarMenuItem>
+
             </SidebarMenu>
           </SidebarGroupContent>
         </SidebarGroup>
 
-
-        {/* Sub-pages for active search */}
+        {/* ── Sub-páginas de búsqueda activa ────────────────────────────── */}
         {activeId && (
           <SidebarGroup>
             <SidebarGroupLabel>Análisis</SidebarGroupLabel>
