@@ -164,7 +164,7 @@ const Index = () => {
       const rutParam = rut.trim() ? `&rut=${encodeURIComponent(rut.trim())}` : '';
       const res = await fetch(
         `/api/osint?nombre=${encodeURIComponent(nombre.trim())}${rutParam}`,
-        { signal: AbortSignal.timeout(25_000) }
+        { signal: AbortSignal.timeout(90_000) }
       );
       const ct = res.headers.get("content-type") ?? "";
       if (!ct.includes("application/json"))
@@ -185,6 +185,8 @@ const Index = () => {
 
   const f = osint?.fuentes;
   const r = osint?.resumen;
+  // Guard: si f o r son undefined no renderizar resultados
+  const hasResults = osint && f && r;
 
   return (
     <Layout>
@@ -304,6 +306,19 @@ const Index = () => {
           </div>
         </div>
 
+        {/* ── Loading state ──────────────────────────────────────────────── */}
+        {loading && (
+          <div className="rounded-xl border border-border bg-card/50 px-6 py-8 text-center space-y-3">
+            <Loader2 className="h-8 w-8 animate-spin text-primary mx-auto" />
+            <p className="text-sm font-medium">Buscando en fuentes públicas...</p>
+            <p className="text-xs text-muted-foreground">
+              Consultando NombreRutYFirma · SERVEL · SII · Empresas · PJUD
+              <br />
+              <span className="text-yellow-500">Primera búsqueda tarda ~20-30 segundos</span>
+            </p>
+          </div>
+        )}
+
         {/* ── Error ───────────────────────────────────────────────────────── */}
         {error && (
           <div className="rounded-xl border border-destructive/40 bg-destructive/10 px-4 py-3 text-sm text-destructive">
@@ -314,7 +329,7 @@ const Index = () => {
         {/* ══════════════════════════════════════════════════════════════════
             RESULTADOS OSINT
         ══════════════════════════════════════════════════════════════════ */}
-        {osint && f && r && (
+        {hasResults && (
           <div className="space-y-4">
 
             {/* Resumen general */}
@@ -329,10 +344,10 @@ const Index = () => {
                 </p>
               </div>
               <div className="flex gap-2 flex-wrap">
-                {(f.nryf_nombre?.length > 0 || f.nryf_rut) && <Badge className="bg-primary/80 text-white text-xs">✓ NRyF</Badge>}
-                {r.inscrito_servel          && <Badge className="bg-blue-600 text-white text-xs">✓ SERVEL</Badge>}
-                {r.tiene_actividad_empresarial && <Badge className="bg-amber-600 text-white text-xs">✓ Empresas</Badge>}
-                {r.tiene_antecedentes_judiciales && <Badge className="bg-red-600 text-white text-xs">⚠ PJUD</Badge>}
+                {((f?.nryf_nombre?.length ?? 0) > 0 || f?.nryf_rut) && <Badge className="bg-primary/80 text-white text-xs">✓ NRyF</Badge>}
+                {r?.inscrito_servel          && <Badge className="bg-blue-600 text-white text-xs">✓ SERVEL</Badge>}
+                {r?.tiene_actividad_empresarial && <Badge className="bg-amber-600 text-white text-xs">✓ Empresas</Badge>}
+                {r?.tiene_antecedentes_judiciales && <Badge className="bg-red-600 text-white text-xs">⚠ PJUD</Badge>}
                 <Button variant="outline" size="sm" className="text-xs h-7"
                   onClick={() => navigate(`/dorks?nombre=${encodeURIComponent(queryRealizada)}`)}>
                   Ver Dorks →
@@ -387,42 +402,35 @@ const Index = () => {
             )}
 
             {/* ── SERVEL ──────────────────────────────────────────────────── */}
-            {Object.keys(f.servel).length > 0 && (
-              <Section title="SERVEL — Padrón Electoral" icon={<Vote className="h-4 w-4 text-blue-400" />} badge={Object.keys(f.servel).length}>
-                {Object.entries(f.servel).map(([rut, s]) => (
-                  <div key={rut} className="rounded-lg border border-border p-4 mb-3 last:mb-0 space-y-2">
-                    <div className="flex items-center justify-between">
-                      <p className="font-medium text-sm">{s.nombre}</p>
-                      <span className="font-mono text-xs text-muted-foreground">{rut}</span>
-                    </div>
-                    <div className="grid grid-cols-2 md:grid-cols-3 gap-2 text-xs text-muted-foreground">
-                      {s.region          && <span>📍 {s.region}</span>}
-                      {s.circunscripcion && <span>🗺 {s.circunscripcion}</span>}
-                      {s.mesa            && <span>🗳 Mesa {s.mesa}</span>}
-                      {s.local           && <span>🏫 {s.local}</span>}
-                      {s.direccion_local && <span>📬 {s.direccion_local}</span>}
-                    </div>
+            {f.servel && (
+              <Section title="SERVEL — Padrón Electoral" icon={<Vote className="h-4 w-4 text-blue-400" />} badge={1}>
+                <div className="rounded-lg border border-border p-4 space-y-2">
+                  <div className="flex items-center justify-between">
+                    <p className="font-medium text-sm">{f.servel.nombre}</p>
+                    <span className="font-mono text-xs text-muted-foreground">{f.servel.rut}</span>
                   </div>
-                ))}
+                  <div className="grid grid-cols-2 md:grid-cols-3 gap-2 text-xs text-muted-foreground">
+                    {f.servel.region          && <span>📍 {f.servel.region}</span>}
+                    {f.servel.circunscripcion && <span>🗺 {f.servel.circunscripcion}</span>}
+                    {f.servel.mesa            && <span>🗳 Mesa {f.servel.mesa}</span>}
+                    {f.servel.local           && <span>🏫 {f.servel.local}</span>}
+                    {f.servel.direccion_local && <span>📬 {f.servel.direccion_local}</span>}
+                  </div>
+                </div>
               </Section>
             )}
 
             {/* ── SII ─────────────────────────────────────────────────────── */}
-            {Object.keys(f.sii).length > 0 && (
-              <Section title="SII — Estado Tributario" icon={<BadgeCheck className="h-4 w-4 text-amber-400" />} badge={Object.keys(f.sii).length}>
-                {Object.entries(f.sii).map(([rut, s]) => (
-                  <div key={rut} className="rounded-lg border border-border p-4 mb-3 last:mb-0 space-y-1.5">
-                    <div className="flex items-center justify-between">
-                      <p className="font-medium text-sm">{s.nombre ?? "—"}</p>
-                      <span className="font-mono text-xs text-muted-foreground">{rut}</span>
-                    </div>
-                    <div className="text-xs text-muted-foreground space-y-0.5">
-                      {s.actividad          && <p>💼 {s.actividad}</p>}
-                      {s.inicio_actividades && <p>📅 Inicio actividades: {s.inicio_actividades}</p>}
-                      {s.contribuyente_iva  && <p>🧾 Contribuyente de IVA</p>}
-                    </div>
+            {f.sii && (
+              <Section title="SII — Estado Tributario" icon={<BadgeCheck className="h-4 w-4 text-amber-400" />} badge={1}>
+                <div className="rounded-lg border border-border p-4 space-y-1.5">
+                  <p className="font-medium text-sm">{f.sii.nombre ?? "—"}</p>
+                  <div className="text-xs text-muted-foreground space-y-0.5">
+                    {f.sii.actividad          && <p>💼 {f.sii.actividad}</p>}
+                    {f.sii.inicio_actividades && <p>📅 Inicio actividades: {f.sii.inicio_actividades}</p>}
+                    {f.sii.contribuyente_iva  && <p>🧾 Contribuyente de IVA</p>}
                   </div>
-                ))}
+                </div>
               </Section>
             )}
 
@@ -508,7 +516,7 @@ const Index = () => {
         )}
 
         {/* ── Búsquedas recientes mock ─────────────────────────────────────── */}
-        {!osint && !loading && (
+        {!osint && !loading && !error && (
           <div className="space-y-4">
             <div className="flex items-center gap-2 text-muted-foreground">
               <History className="h-4 w-4" />

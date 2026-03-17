@@ -59,22 +59,31 @@ def _parsear_tabla(html: str) -> list[dict]:
     if not tabla:
         return []
 
+    # Leer headers reales
+    ths = [th.get_text(strip=True) for th in tabla.find_all("th")]
+    print(f"[parser] Headers encontrados: {ths}")
+
     col: dict[str, int] = {}
-    for i, th in enumerate(tabla.find_all("th")):
-        txt = th.get_text(strip=True).lower()
+    for i, txt in enumerate(th.lower() for th in ths):
         if "nombre"    in txt: col["nombre"] = i
         elif "rut"     in txt: col["rut"] = i
         elif "sexo"    in txt: col["sexo"] = i
         elif "direcci" in txt: col["direccion"] = i
         elif "ciudad"  in txt or "comuna" in txt: col["ciudad"] = i
+
+    # Si no detectó headers, asumir orden por defecto de nombrerutyfirma
     if not col:
+        print("[parser] Sin headers — usando orden por defecto")
         col = {"nombre": 0, "rut": 1, "sexo": 2, "direccion": 3, "ciudad": 4}
+
+    print(f"[parser] Mapa de columnas: {col}")
 
     resultados = []
     for fila in tabla.find_all("tr")[1:]:
         tds = [td.get_text(strip=True) for td in fila.find_all("td")]
         if len(tds) < 2:
             continue
+        print(f"[parser] Fila raw: {tds}")
         def gc(k):
             i = col.get(k)
             return tds[i] if i is not None and i < len(tds) and tds[i] else None
