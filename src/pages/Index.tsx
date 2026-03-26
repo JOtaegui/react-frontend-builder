@@ -183,14 +183,14 @@ const Index = () => {
               onChange={(e) => setNombre(e.target.value)}
               onKeyDown={(e) => e.key === "Enter" && handleBuscar()}
               placeholder="Nombre completo..."
-              className="w-full h-11 px-4 rounded-lg bg-card border border-border text-sm focus:outline-none focus:ring-1 focus:ring-primary/50 focus:border-primary/50 transition-colors"
+              className="w-full h-14 px-5 rounded-xl bg-card border border-border text-base focus:outline-none focus:ring-2 focus:ring-primary/50 focus:border-primary/50 transition-colors"
             />
           </div>
 
           <Popover>
             <PopoverTrigger asChild>
-              <button className="h-11 w-11 rounded-lg border border-border bg-card hover:bg-muted/50 transition-colors flex items-center justify-center shrink-0">
-                <SlidersHorizontal className="h-4 w-4 text-muted-foreground" />
+              <button className="h-14 w-14 rounded-xl border border-border bg-card hover:bg-muted/50 transition-colors flex items-center justify-center shrink-0">
+                <SlidersHorizontal className="h-5 w-5 text-muted-foreground" />
               </button>
             </PopoverTrigger>
             <PopoverContent className="w-72 space-y-4" align="end">
@@ -239,7 +239,7 @@ const Index = () => {
           <button
             disabled={!nombre.trim() || loading || backendStatus === "offline"}
             onClick={handleBuscar}
-            className="h-11 px-5 rounded-lg bg-primary text-primary-foreground text-sm font-medium shrink-0 disabled:opacity-40 hover:bg-primary/90 transition-colors flex items-center gap-2"
+            className="h-14 px-6 rounded-xl bg-primary text-primary-foreground text-base font-medium shrink-0 disabled:opacity-40 hover:bg-primary/90 transition-colors flex items-center gap-2"
           >
             {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Eye className="h-4 w-4" />}
             {loading ? "Buscando..." : "Buscar"}
