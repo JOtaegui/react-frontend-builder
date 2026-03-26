@@ -5,6 +5,7 @@ import { Toaster } from "@/components/ui/toaster";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import Index from "./pages/Index.tsx";
 import Resultados from "./pages/Resultados.tsx";
+import ResultadosList from "./pages/ResultadosList.tsx";
 import Hallazgos from "./pages/Hallazgos.tsx";
 import PlanAccion from "./pages/PlanAccion.tsx";
 import Dorks from "./pages/Dorks.tsx";
