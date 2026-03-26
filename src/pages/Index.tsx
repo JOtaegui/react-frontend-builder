@@ -189,8 +189,8 @@ const Index = () => {
 
           <Popover>
             <PopoverTrigger asChild>
-              <button className="h-11 w-11 rounded-lg border border-border bg-card hover:bg-muted/50 transition-colors flex items-center justify-center shrink-0">
-                <SlidersHorizontal className="h-4 w-4 text-muted-foreground" />
+              <button className="h-14 w-14 rounded-xl border border-border bg-card hover:bg-muted/50 transition-colors flex items-center justify-center shrink-0">
+                <SlidersHorizontal className="h-5 w-5 text-muted-foreground" />
               </button>
             </PopoverTrigger>
             <PopoverContent className="w-72 space-y-4" align="end">
