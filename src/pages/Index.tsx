@@ -183,7 +183,7 @@ const Index = () => {
               onChange={(e) => setNombre(e.target.value)}
               onKeyDown={(e) => e.key === "Enter" && handleBuscar()}
               placeholder="Nombre completo..."
-              className="w-full h-11 px-4 rounded-lg bg-card border border-border text-sm focus:outline-none focus:ring-1 focus:ring-primary/50 focus:border-primary/50 transition-colors"
+              className="w-full h-14 px-5 rounded-xl bg-card border border-border text-base focus:outline-none focus:ring-2 focus:ring-primary/50 focus:border-primary/50 transition-colors"
             />
           </div>
 
