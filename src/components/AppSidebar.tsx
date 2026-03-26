@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { useParams, useLocation } from "react-router-dom";
+import { useParams, useLocation, useNavigate } from "react-router-dom";
 import {
   Fingerprint, Home, BarChart3, FileSearch, ClipboardCheck, Search, Ghost,
 } from "lucide-react";
@@ -19,6 +19,12 @@ import {
   SidebarHeader,
   useSidebar,
 } from "@/components/ui/sidebar";
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "@/components/ui/collapsible";
+import { ChevronDown } from "lucide-react";
 
 export function AppSidebar() {
   const { state } = useSidebar();
@@ -26,17 +32,20 @@ export function AppSidebar() {
   const { id } = useParams();
   const location = useLocation();
   const [searchQuery, setSearchQuery] = useState("");
+  const [resultadosOpen, setResultadosOpen] = useState(false);
 
   const activeId = id || location.pathname.match(/\/(resultados|hallazgos|plan)\/(\w+)/)?.[2];
-
   const dorksNombre = new URLSearchParams(location.search).get("nombre") ?? "";
+
+  // Auto-open when on a results page
+  const isOnResultsPage = location.pathname.startsWith("/resultados");
+  const isOpen = resultadosOpen || isOnResultsPage;
 
   const filteredSearches = mockSearches.filter((s) =>
     s.nombre.toLowerCase().includes(searchQuery.toLowerCase())
   );
 
   const subPages = [
-    { title: "Resultados",     base: "resultados", icon: BarChart3 },
     { title: "Hallazgos",      base: "hallazgos",  icon: FileSearch },
     { title: "Plan de Acción", base: "plan",        icon: ClipboardCheck },
   ];
@@ -82,55 +91,66 @@ export function AppSidebar() {
                   </NavLink>
                 </SidebarMenuButton>
               </SidebarMenuItem>
+
+              {/* Resultados - collapsible */}
+              <SidebarMenuItem>
+                <Collapsible open={isOpen} onOpenChange={setResultadosOpen}>
+                  <CollapsibleTrigger className="w-full flex items-center gap-2 px-2 py-2 rounded-md text-sm hover:bg-muted/50 transition-colors">
+                    <BarChart3 className="h-4 w-4 shrink-0" />
+                    {!collapsed && (
+                      <>
+                        <span className="flex-1 text-left">Resultados</span>
+                        <ChevronDown className={`h-3.5 w-3.5 text-muted-foreground transition-transform ${isOpen ? "rotate-180" : ""}`} />
+                      </>
+                    )}
+                  </CollapsibleTrigger>
+
+                  {!collapsed && (
+                    <CollapsibleContent>
+                      <div className="mt-1 ml-2 border-l border-border pl-3 space-y-2">
+                        {/* Search inside */}
+                        <div className="relative">
+                          <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
+                          <Input
+                            value={searchQuery}
+                            onChange={(e) => setSearchQuery(e.target.value)}
+                            placeholder="Buscar por nombre..."
+                            className="h-7 pl-8 text-xs bg-muted/30 border-border"
+                          />
+                        </div>
+
+                        {/* Results list */}
+                        <div className="space-y-0.5 max-h-[280px] overflow-y-auto">
+                          {filteredSearches.length === 0 ? (
+                            <div className="py-3 text-center">
+                              <Ghost className="h-4 w-4 mx-auto mb-1 text-muted-foreground/50" />
+                              <p className="text-[10px] text-muted-foreground/70">Sin resultados</p>
+                            </div>
+                          ) : (
+                            filteredSearches.map((s) => (
+                              <NavLink
+                                key={s.id}
+                                to={`/resultados/${s.id}`}
+                                className="flex items-center gap-2 px-2 py-1.5 rounded-md hover:bg-muted/50 transition-colors"
+                                activeClassName="bg-primary/10 text-primary"
+                              >
+                                <div className="flex-1 min-w-0">
+                                  <p className="text-[11px] font-medium truncate">{s.nombre}</p>
+                                  <p className="text-[10px] text-muted-foreground truncate">{s.hallazgos} hallazgos</p>
+                                </div>
+                                <RiskBadge level={s.riesgo} />
+                              </NavLink>
+                            ))
+                          )}
+                        </div>
+                      </div>
+                    </CollapsibleContent>
+                  )}
+                </Collapsible>
+              </SidebarMenuItem>
             </SidebarMenu>
           </SidebarGroupContent>
         </SidebarGroup>
-
-        {/* ── Resultados guardados ──────────────────────── */}
-        {!collapsed && (
-          <SidebarGroup>
-            <SidebarGroupLabel>Resultados</SidebarGroupLabel>
-            <SidebarGroupContent>
-              <div className="px-2 pb-2">
-                <div className="relative">
-                  <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
-                  <Input
-                    value={searchQuery}
-                    onChange={(e) => setSearchQuery(e.target.value)}
-                    placeholder="Buscar..."
-                    className="h-8 pl-8 text-xs bg-muted/30 border-border"
-                  />
-                </div>
-              </div>
-              <SidebarMenu>
-                {filteredSearches.length === 0 ? (
-                  <div className="px-3 py-4 text-center">
-                    <Ghost className="h-5 w-5 mx-auto mb-1.5 text-muted-foreground/50" />
-                    <p className="text-xs text-muted-foreground/70">Sin resultados</p>
-                  </div>
-                ) : (
-                  filteredSearches.map((s) => (
-                    <SidebarMenuItem key={s.id}>
-                      <SidebarMenuButton asChild>
-                        <NavLink
-                          to={`/resultados/${s.id}`}
-                          className="hover:bg-muted/50 flex items-center gap-2"
-                          activeClassName="bg-primary/10 text-primary font-medium"
-                        >
-                          <div className="flex-1 min-w-0">
-                            <p className="text-xs font-medium truncate">{s.nombre}</p>
-                            <p className="text-[10px] text-muted-foreground truncate">{s.fecha} · {s.hallazgos} hallazgos</p>
-                          </div>
-                          <RiskBadge level={s.riesgo} />
-                        </NavLink>
-                      </SidebarMenuButton>
-                    </SidebarMenuItem>
-                  ))
-                )}
-              </SidebarMenu>
-            </SidebarGroupContent>
-          </SidebarGroup>
-        )}
 
         {/* ── Análisis de búsqueda activa ──────────────── */}
         {activeId && (
