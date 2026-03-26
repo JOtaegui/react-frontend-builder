@@ -239,7 +239,7 @@ const Index = () => {
           <button
             disabled={!nombre.trim() || loading || backendStatus === "offline"}
             onClick={handleBuscar}
-            className="h-11 px-5 rounded-lg bg-primary text-primary-foreground text-sm font-medium shrink-0 disabled:opacity-40 hover:bg-primary/90 transition-colors flex items-center gap-2"
+            className="h-14 px-6 rounded-xl bg-primary text-primary-foreground text-base font-medium shrink-0 disabled:opacity-40 hover:bg-primary/90 transition-colors flex items-center gap-2"
           >
             {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Eye className="h-4 w-4" />}
             {loading ? "Buscando..." : "Buscar"}
