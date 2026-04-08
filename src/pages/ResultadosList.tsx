@@ -1,16 +1,50 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { Layout } from "@/components/Layout";
-import { mockSearches } from "@/data/mockData";
-import { RiskBadge } from "@/components/RiskBadge";
 import { Input } from "@/components/ui/input";
-import { Search, Ghost, ArrowRight } from "lucide-react";
+import { Search, Ghost, ArrowRight, Loader2 } from "lucide-react";
+
+interface SearchHistoryItem {
+  id: string;
+  nombre: string;
+  rut?: string | null;
+  fecha: string;
+  riesgo: string;
+  hallazgos: number;
+  fuentes: number;
+}
 
 export default function ResultadosList() {
   const navigate = useNavigate();
   const [query, setQuery] = useState("");
+  const [items, setItems] = useState<SearchHistoryItem[]>([]);
+  const [loading, setLoading] = useState(true);
 
-  const filtered = mockSearches.filter((s) =>
+  useEffect(() => {
+    let cancelled = false;
+
+    const cargar = async () => {
+      try {
+        const res = await fetch("/api/searches?limit=100", {
+          signal: AbortSignal.timeout(10000),
+        });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data: SearchHistoryItem[] = await res.json();
+        if (!cancelled) setItems(data);
+      } catch {
+        if (!cancelled) setItems([]);
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    };
+
+    void cargar();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const filtered = items.filter((s) =>
     s.nombre.toLowerCase().includes(query.toLowerCase())
   );
 
@@ -33,8 +67,12 @@ export default function ResultadosList() {
           />
         </div>
 
-        {/* Results */}
-        {filtered.length === 0 ? (
+        {loading ? (
+          <div className="text-center py-16 space-y-2">
+            <Loader2 className="h-8 w-8 mx-auto text-muted-foreground/60 animate-spin" />
+            <p className="text-sm text-muted-foreground">Cargando búsquedas...</p>
+          </div>
+        ) : filtered.length === 0 ? (
           <div className="text-center py-16 space-y-2">
             <Ghost className="h-8 w-8 mx-auto text-muted-foreground/40" />
             <p className="text-sm text-muted-foreground">No se encontraron resultados</p>
@@ -53,7 +91,9 @@ export default function ResultadosList() {
                     {s.fecha} · {s.hallazgos} hallazgos · {s.fuentes} fuentes
                   </p>
                 </div>
-                <RiskBadge level={s.riesgo} />
+                <span className="text-xs text-muted-foreground border border-border px-2 py-1 rounded-full shrink-0">
+                  {s.riesgo || "Sin datos"}
+                </span>
                 <ArrowRight className="h-4 w-4 text-muted-foreground opacity-0 group-hover:opacity-100 transition-opacity shrink-0" />
               </button>
             ))}

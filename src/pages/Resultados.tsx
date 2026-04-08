@@ -1,171 +1,409 @@
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useParams, Navigate } from "react-router-dom";
 import { Layout } from "@/components/Layout";
-import { RiskBadge } from "@/components/RiskBadge";
-import { SearchFilter } from "@/components/SearchFilter";
-import { getSearchById } from "@/data/mockData";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Progress } from "@/components/ui/progress";
+import { Input } from "@/components/ui/input";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { FileSearch, ShieldAlert, BarChart3, Clock, Database, AlertTriangle, Eye } from "lucide-react";
+import { SearchFilter } from "@/components/SearchFilter";
+import { Users, Mail, Database, Loader2, SearchX, Building2 } from "lucide-react";
+
+interface NRYFEntry {
+  nombre: string;
+  rut: string;
+  sexo?: string;
+  direccion?: string;
+  ciudad?: string;
+}
+
+interface EmailEntry {
+  email: string;
+  url?: string;
+  fuente?: string;
+  contexto?: string;
+  confidence?: number;
+  match_type?: string;
+  existence_status?: string;
+  institutional_domain?: string;
+  domain_category?: string;
+}
+
+interface InstitucionEntry {
+  nombre: string;
+  confidence?: number;
+  source_type?: string;
+  fuente?: string;
+  url?: string;
+  contexto?: string;
+}
+
+interface SearchDetailResponse {
+  id: string;
+  nombre: string;
+  rut?: string | null;
+  fecha: string;
+  riesgo: string;
+  risk_score: number;
+  hallazgos: number;
+  fuentes: number;
+  resultado: {
+    query: string;
+    rut?: string | null;
+    search_id?: string | null;
+    fuentes?: {
+      nryf_nombre?: NRYFEntry[];
+      emails_publicos?: EmailEntry[];
+      instituciones_relacionadas?: InstitucionEntry[];
+    };
+    resumen?: {
+      total_hallazgos?: number;
+      fuentes_con_datos?: string[];
+      advertencia?: string;
+      emails_encontrados?: string[];
+    };
+  };
+}
 
 export default function Resultados() {
   const { id } = useParams();
   const [filter, setFilter] = useState("");
-  const data = getSearchById(id || "");
+  const [data, setData] = useState<SearchDetailResponse | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [notFound, setNotFound] = useState(false);
 
-  if (!data) return <Navigate to="/" />;
+  useEffect(() => {
+    let cancelled = false;
+
+    const cargar = async () => {
+      if (!id) {
+        setNotFound(true);
+        setLoading(false);
+        return;
+      }
+
+      try {
+        const res = await fetch(`/api/searches/${id}`, {
+          signal: AbortSignal.timeout(15000),
+        });
+        if (res.status === 404) {
+          if (!cancelled) setNotFound(true);
+          return;
+        }
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const payload: SearchDetailResponse = await res.json();
+        if (!cancelled) setData(payload);
+      } catch {
+        if (!cancelled) setNotFound(true);
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    };
+
+    void cargar();
+    return () => {
+      cancelled = true;
+    };
+  }, [id]);
 
   const q = filter.toLowerCase();
-  const filteredFindings = data.categories.filter(
-    (c) => c.categoria.toLowerCase().includes(q) || c.riesgo.toLowerCase().includes(q)
+  const nryf = useMemo(
+    () => (data?.resultado.fuentes?.nryf_nombre ?? []).filter((item) =>
+      [item.nombre, item.rut, item.sexo ?? "", item.direccion ?? "", item.ciudad ?? ""]
+        .some((value) => value.toLowerCase().includes(q))
+    ),
+    [data, q],
   );
-  const filteredAlerts = data.alerts.filter(
-    (a) => a.alerta.toLowerCase().includes(q) || a.fuente.toLowerCase().includes(q) || a.prioridad.toLowerCase().includes(q)
+  const emails = useMemo(
+    () => (data?.resultado.fuentes?.emails_publicos ?? []).filter((item) =>
+      [item.email, item.fuente ?? "", item.contexto ?? "", item.url ?? ""]
+        .some((value) => value.toLowerCase().includes(q))
+    ),
+    [data, q],
+  );
+  const confirmedEmails = useMemo(
+    () => emails.filter((item) => item.existence_status === "published" && item.match_type !== "generated"),
+    [emails],
+  );
+  const candidateEmails = useMemo(
+    () => emails.filter((item) => item.existence_status !== "published" || item.match_type === "generated"),
+    [emails],
+  );
+  const instituciones = useMemo(
+    () => (data?.resultado.fuentes?.instituciones_relacionadas ?? []).filter((item) =>
+      [item.nombre, item.fuente ?? "", item.contexto ?? "", item.url ?? ""]
+        .some((value) => value.toLowerCase().includes(q))
+    ),
+    [data, q],
   );
 
-  const riskColor =
-    data.puntajeRiesgo >= 75 ? "text-red-500" : data.puntajeRiesgo >= 50 ? "text-orange-500" : data.puntajeRiesgo >= 25 ? "text-yellow-500" : "text-green-500";
+  if (notFound) return <Navigate to="/" replace />;
 
   return (
     <Layout>
       <div className="max-w-6xl mx-auto space-y-6">
-        {/* Header */}
-        <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
-          <div>
-            <h2 className="text-2xl font-bold">{data.nombre}</h2>
-            <p className="text-sm text-muted-foreground">
-              Búsqueda: {data.fecha} · {data.hallazgos} hallazgos · {data.tiempoBusqueda}
-            </p>
+        {loading ? (
+          <div className="py-20 text-center space-y-3">
+            <Loader2 className="h-8 w-8 mx-auto animate-spin text-muted-foreground" />
+            <p className="text-sm text-muted-foreground">Cargando resultado guardado...</p>
           </div>
-          <div className="w-full md:w-80">
-            <SearchFilter value={filter} onChange={setFilter} placeholder="Filtrar resultados..." />
+        ) : !data ? (
+          <div className="py-20 text-center space-y-3">
+            <SearchX className="h-8 w-8 mx-auto text-muted-foreground/50" />
+            <p className="text-sm text-muted-foreground">No se pudo cargar el resultado.</p>
           </div>
-        </div>
-
-        {/* Risk Index */}
-        <Card>
-          <CardHeader>
-            <CardTitle className="flex items-center gap-2">
-              <ShieldAlert className="h-5 w-5" />
-              Índice de Riesgo Global
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="flex items-center gap-4">
-              <span className={`text-4xl font-bold ${riskColor}`}>{data.puntajeRiesgo}</span>
-              <span className="text-muted-foreground text-lg">/ 100</span>
-              <RiskBadge level={data.riesgo} />
+        ) : (
+          <>
+            <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+              <div>
+                <h2 className="text-2xl font-bold">{data.nombre}</h2>
+                <p className="text-sm text-muted-foreground">
+                  {data.fecha} · {data.hallazgos} hallazgos · {data.fuentes} fuentes
+                </p>
+                {(data.resultado.resumen?.fuentes_con_datos?.length ?? 0) > 0 && (
+                  <p className="text-xs text-muted-foreground mt-1">
+                    {data.resultado.resumen?.fuentes_con_datos?.join(" · ")}
+                  </p>
+                )}
+              </div>
+              <div className="w-full md:w-80">
+                <SearchFilter value={filter} onChange={setFilter} placeholder="Filtrar NRYF o emails..." />
+              </div>
             </div>
-            <Progress value={data.puntajeRiesgo} className="mt-3 h-3" />
-          </CardContent>
-        </Card>
 
-        {/* Quick Summary */}
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-          {[
-            { icon: FileSearch, label: "Total hallazgos", value: data.hallazgos },
-            { icon: Database, label: "Fuentes", value: data.fuentes },
-            { icon: AlertTriangle, label: "Datos críticos", value: data.datosCriticos },
-            { icon: Eye, label: "Alertas activas", value: data.alertasActivas },
-          ].map((m) => (
-            <Card key={m.label}>
-              <CardContent className="pt-6 text-center">
-                <m.icon className="h-6 w-6 mx-auto mb-2 text-primary" />
-                <p className="text-2xl font-bold">{m.value}</p>
-                <p className="text-xs text-muted-foreground">{m.label}</p>
-              </CardContent>
-            </Card>
-          ))}
-        </div>
-
-        {/* Categories */}
-        <Card>
-          <CardHeader>
-            <CardTitle className="flex items-center gap-2">
-              <BarChart3 className="h-5 w-5" />
-              Hallazgos por Categoría
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Categoría</TableHead>
-                  <TableHead className="text-center">Cantidad</TableHead>
-                  <TableHead>Riesgo</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {filteredFindings.map((c) => (
-                  <TableRow key={c.categoria}>
-                    <TableCell className="font-medium">{c.categoria}</TableCell>
-                    <TableCell className="text-center">{c.cantidad}</TableCell>
-                    <TableCell><RiskBadge level={c.riesgo} /></TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
-          </CardContent>
-        </Card>
-
-        {/* Alerts */}
-        <Card>
-          <CardHeader>
-            <CardTitle className="flex items-center gap-2">
-              <AlertTriangle className="h-5 w-5" />
-              Alertas Prioritarias
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Alerta</TableHead>
-                  <TableHead>Fuente</TableHead>
-                  <TableHead>Prioridad</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {filteredAlerts.map((a) => (
-                  <TableRow key={a.id}>
-                    <TableCell>{a.alerta}</TableCell>
-                    <TableCell className="text-muted-foreground">{a.fuente}</TableCell>
-                    <TableCell><RiskBadge level={a.prioridad} /></TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
-          </CardContent>
-        </Card>
-
-        {/* Timeline */}
-        <Card>
-          <CardHeader>
-            <CardTitle className="flex items-center gap-2">
-              <Clock className="h-5 w-5" />
-              Línea de Tiempo de Exposición
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="space-y-4">
-              {data.timeline.map((t, i) => (
-                <div key={i} className="flex gap-4 items-start">
-                  <div className="flex flex-col items-center">
-                    <div className="h-3 w-3 rounded-full bg-primary" />
-                    {i < data.timeline.length - 1 && <div className="w-px h-full bg-border flex-1 min-h-[2rem]" />}
-                  </div>
-                  <div className="pb-4">
-                    <p className="text-sm font-semibold">{t.evento}</p>
-                    <p className="text-xs text-muted-foreground">{t.fecha} · {t.fuente}</p>
-                    <p className="text-xs text-muted-foreground">Datos: {t.datosExpuestos}</p>
-                    <span className={`text-xs ${t.estado === "Sin resolver" ? "text-red-400" : "text-yellow-400"}`}>{t.estado}</span>
-                  </div>
-                </div>
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+              {[
+                { icon: Database, label: "Hallazgos", value: data.hallazgos },
+                { icon: Users, label: "Registros NRYF", value: data.resultado.fuentes?.nryf_nombre?.length ?? 0 },
+                { icon: Mail, label: "Emails públicos", value: confirmedEmails.length },
+                { icon: Building2, label: "Instituciones", value: data.resultado.fuentes?.instituciones_relacionadas?.length ?? 0 },
+                { icon: Mail, label: "Emails totales", value: data.resultado.resumen?.emails_encontrados?.length ?? 0 },
+              ].map((item) => (
+                <Card key={item.label}>
+                  <CardContent className="pt-6 text-center">
+                    <item.icon className="h-6 w-6 mx-auto mb-2 text-primary" />
+                    <p className="text-2xl font-bold">{item.value}</p>
+                    <p className="text-xs text-muted-foreground">{item.label}</p>
+                  </CardContent>
+                </Card>
               ))}
             </div>
-          </CardContent>
-        </Card>
+
+            {data.resultado.resumen?.advertencia && (
+              <div className="px-4 py-3 rounded-lg border border-amber-500/20 bg-amber-500/5 text-sm text-amber-200">
+                {data.resultado.resumen?.advertencia}
+              </div>
+            )}
+
+            <Card>
+              <CardHeader>
+                <CardTitle className="flex items-center gap-2">
+                  <Users className="h-5 w-5" />
+                  Resultados NRYF
+                </CardTitle>
+              </CardHeader>
+              <CardContent>
+                {nryf.length === 0 ? (
+                  <p className="text-sm text-muted-foreground">No hay resultados NRYF para esta búsqueda.</p>
+                ) : (
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead>Nombre</TableHead>
+                        <TableHead>RUT</TableHead>
+                        <TableHead>Sexo</TableHead>
+                        <TableHead>Dirección</TableHead>
+                        <TableHead>Ciudad</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {nryf.map((item, idx) => (
+                        <TableRow key={`${item.rut}-${idx}`}>
+                          <TableCell className="font-medium">{item.nombre}</TableCell>
+                          <TableCell className="font-mono text-xs">{item.rut}</TableCell>
+                          <TableCell>{item.sexo ?? "—"}</TableCell>
+                          <TableCell>{item.direccion ?? "—"}</TableCell>
+                          <TableCell>{item.ciudad ?? "—"}</TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                )}
+              </CardContent>
+            </Card>
+
+            <Card>
+              <CardHeader>
+                <CardTitle className="flex items-center gap-2">
+                  <Building2 className="h-5 w-5" />
+                  Instituciones Relacionadas
+                </CardTitle>
+              </CardHeader>
+              <CardContent>
+                {instituciones.length === 0 ? (
+                  <p className="text-sm text-muted-foreground">Aún no se identificaron instituciones asociadas.</p>
+                ) : (
+                  <div className="space-y-3">
+                    {instituciones.map((item, idx) => (
+                      <div key={`${item.nombre}-${idx}`} className="rounded-lg border border-border p-4">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className="text-sm font-medium">{item.nombre}</span>
+                          {typeof item.confidence === "number" && (
+                            <span className="text-[11px] text-muted-foreground border border-border px-2 py-0.5 rounded-full">
+                              conf. {Math.round(item.confidence * 100)}%
+                            </span>
+                          )}
+                          {item.source_type && (
+                            <span className="text-[11px] text-cyan-300 border border-cyan-500/30 px-2 py-0.5 rounded-full">
+                              {item.source_type}
+                            </span>
+                          )}
+                          {item.fuente && (
+                            <span className="text-[11px] text-muted-foreground border border-border px-2 py-0.5 rounded-full">
+                              {item.fuente}
+                            </span>
+                          )}
+                        </div>
+                        {item.contexto && (
+                          <p className="text-xs text-muted-foreground mt-2">{item.contexto}</p>
+                        )}
+                        {item.url && (
+                          <a
+                            href={item.url}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="text-xs text-primary hover:underline mt-2 inline-block"
+                          >
+                            Ver fuente
+                          </a>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+
+            <Card>
+              <CardHeader>
+                <CardTitle className="flex items-center gap-2">
+                  <Mail className="h-5 w-5" />
+                  Emails Confirmados en Web
+                </CardTitle>
+              </CardHeader>
+              <CardContent>
+                {confirmedEmails.length === 0 ? (
+                  <p className="text-sm text-muted-foreground">Aún no se encontraron emails públicos confirmados con fuente.</p>
+                ) : (
+                  <div className="space-y-3">
+                    {confirmedEmails.map((item, idx) => (
+                      <div key={`${item.email}-${idx}`} className="rounded-lg border border-border p-4">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <a href={`mailto:${item.email}`} className="font-mono text-sm hover:text-primary transition-colors">
+                            {item.email}
+                          </a>
+                          <span className={`text-[11px] border px-2 py-0.5 rounded-full ${
+                            item.existence_status === "published"
+                              ? "text-emerald-300 border-emerald-500/30"
+                              : "text-amber-300 border-amber-500/30"
+                          }`}>
+                            {item.existence_status === "published" ? "existe/publicado" : "no confirmado"}
+                          </span>
+                          {typeof item.confidence === "number" && (
+                            <span className="text-[11px] text-muted-foreground border border-border px-2 py-0.5 rounded-full">
+                              conf. {Math.round(item.confidence * 100)}%
+                            </span>
+                          )}
+                          {item.match_type && (
+                            <span className="text-[11px] text-muted-foreground border border-border px-2 py-0.5 rounded-full">
+                              {item.match_type}
+                            </span>
+                          )}
+                          {item.fuente && (
+                            <span className="text-[11px] text-muted-foreground border border-border px-2 py-0.5 rounded-full">
+                              {item.fuente}
+                            </span>
+                          )}
+                          {item.institutional_domain && (
+                            <span className="text-[11px] text-cyan-300 border border-cyan-500/30 px-2 py-0.5 rounded-full">
+                              dominio institucional: {item.institutional_domain}
+                            </span>
+                          )}
+                          {item.domain_category && !item.institutional_domain && (
+                            <span className="text-[11px] text-muted-foreground border border-border px-2 py-0.5 rounded-full">
+                              {item.domain_category}
+                            </span>
+                          )}
+                        </div>
+                        {item.contexto && (
+                          <p className="text-xs text-muted-foreground mt-2">{item.contexto}</p>
+                        )}
+                        {item.url && (
+                          <a
+                            href={item.url}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="text-xs text-primary hover:underline mt-2 inline-block"
+                          >
+                            Ver fuente
+                          </a>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+
+            <Card>
+              <CardHeader>
+                <CardTitle className="flex items-center gap-2">
+                  <Mail className="h-5 w-5" />
+                  Posibles Correos
+                </CardTitle>
+              </CardHeader>
+              <CardContent>
+                {candidateEmails.length === 0 ? (
+                  <p className="text-sm text-muted-foreground">No hay candidatos generados para esta búsqueda.</p>
+                ) : (
+                  <div className="space-y-3">
+                    {candidateEmails.map((item, idx) => (
+                      <div key={`${item.email}-${idx}`} className="rounded-lg border border-border p-4">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className="font-mono text-sm">{item.email}</span>
+                          <span className="text-[11px] text-amber-300 border border-amber-500/30 px-2 py-0.5 rounded-full">
+                            no confirmado
+                          </span>
+                          {typeof item.confidence === "number" && (
+                            <span className="text-[11px] text-muted-foreground border border-border px-2 py-0.5 rounded-full">
+                              conf. {Math.round(item.confidence * 100)}%
+                            </span>
+                          )}
+                          {item.match_type && (
+                            <span className="text-[11px] text-muted-foreground border border-border px-2 py-0.5 rounded-full">
+                              {item.match_type}
+                            </span>
+                          )}
+                          {item.fuente && (
+                            <span className="text-[11px] text-muted-foreground border border-border px-2 py-0.5 rounded-full">
+                              {item.fuente}
+                            </span>
+                          )}
+                          {item.domain_category && (
+                            <span className="text-[11px] text-muted-foreground border border-border px-2 py-0.5 rounded-full">
+                              {item.domain_category}
+                            </span>
+                          )}
+                        </div>
+                        {item.contexto && (
+                          <p className="text-xs text-muted-foreground mt-2">{item.contexto}</p>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+          </>
+        )}
       </div>
     </Layout>
   );

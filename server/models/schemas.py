@@ -1,0 +1,243 @@
+"""
+Schemas — modelos Pydantic que mapean 1:1 con las interfaces TypeScript del frontend.
+Si agregas un campo aquí, agrégalo también en el frontend (OSINTFuentes / OSINTResumen).
+"""
+from __future__ import annotations
+from typing import Literal, Optional
+from pydantic import BaseModel
+
+
+# ── Fuentes individuales ────────────────────────────────────────────────────
+
+class NRYFEntry(BaseModel):
+    nombre: str
+    rut: str
+    sexo: Optional[str] = None
+    direccion: Optional[str] = None
+    ciudad: Optional[str] = None
+
+
+class ServelEntry(BaseModel):
+    nombre: str
+    rut: str
+    circunscripcion: Optional[str] = None
+    region: Optional[str] = None
+    mesa: Optional[str] = None
+    local: Optional[str] = None
+    direccion_local: Optional[str] = None
+
+
+class SIIEntry(BaseModel):
+    nombre: Optional[str] = None
+    actividad: Optional[str] = None
+    contribuyente_iva: Optional[bool] = None
+    inicio_actividades: Optional[str] = None
+
+
+class EmpresaEntry(BaseModel):
+    razon_social: str
+    rut_empresa: Optional[str] = None
+    tipo: Optional[str] = None
+    estado: Optional[str] = None
+
+
+class PjudEntry(BaseModel):
+    rol: str
+    tribunal: str
+    materia: Optional[str] = None
+    estado: Optional[str] = None
+    fecha: Optional[str] = None
+
+
+class DiarioOficialEntry(BaseModel):
+    titulo: str
+    url: str
+    descripcion: Optional[str] = None
+
+
+class EmailEntry(BaseModel):
+    email: str
+    url: Optional[str] = None
+    fuente: Optional[str] = None
+    contexto: Optional[str] = None
+    confidence: Optional[float] = None
+    match_type: Optional[str] = None
+    existence_status: Optional[str] = None
+    institutional_domain: Optional[str] = None
+    domain_category: Optional[str] = None
+
+
+class InstitucionEntry(BaseModel):
+    nombre: str
+    confidence: Optional[float] = None
+    source_type: Optional[str] = None
+    fuente: Optional[str] = None
+    url: Optional[str] = None
+    contexto: Optional[str] = None
+
+
+# ── HIBP ────────────────────────────────────────────────────────────────────
+
+class BreachEntry(BaseModel):
+    source: str
+    data_types: list[str] = []
+    breach_date: Optional[str] = None
+
+
+class HibpResult(BaseModel):
+    email: str
+    breaches: list[BreachEntry] = []
+    pwned: bool = False
+
+
+# ── Identificación por correo ────────────────────────────────────────────────
+
+class EmailHeaderKV(BaseModel):
+    name: str
+    value: str
+
+
+class AuthorizedEmailMessage(BaseModel):
+    provider_message_id: Optional[str] = None
+    thread_id: Optional[str] = None
+    received_at: Optional[str] = None
+    label_ids: list[str] = []
+    subject: Optional[str] = None
+    snippet: Optional[str] = None
+    body_text: Optional[str] = None
+    body_html: Optional[str] = None
+    headers: list[EmailHeaderKV] = []
+
+
+class EmailIdentificationRequest(BaseModel):
+    provider: Literal["manual", "gmail"] = "manual"
+    email_address: Optional[str] = None
+    gmail_access_token: Optional[str] = None
+    max_messages: int = 200
+    messages: list[AuthorizedEmailMessage] = []
+
+
+class SenderEvidence(BaseModel):
+    message_count: int = 0
+    spam_count: int = 0
+    trash_count: int = 0
+    first_seen: Optional[str] = None
+    last_seen: Optional[str] = None
+    sample_subjects: list[str] = []
+    from_addresses: list[str] = []
+    reply_to_addresses: list[str] = []
+    return_path_addresses: list[str] = []
+    auth_domains: list[str] = []
+    subdomains: list[str] = []
+
+
+class SenderRiskAssessment(BaseModel):
+    level: Literal["low", "medium", "high"] = "low"
+    reasons: list[str] = []
+    suspected_newsletter: bool = False
+    suspected_data_broker: bool = False
+    suspicious_infrastructure: bool = False
+    aggressive_marketing: bool = False
+
+
+class WhoisSummary(BaseModel):
+    registrar: Optional[str] = None
+    registrant: Optional[str] = None
+    country: Optional[str] = None
+    source: Optional[str] = None
+
+
+class IdentifiedSender(BaseModel):
+    company_name: str
+    normalized_domain: str
+    primary_domain: str
+    sender_type: str
+    country: str
+    is_chilean: bool = False
+    confidence: float = 0.0
+    personal_data_confidence: float = 0.0
+    tld: Optional[str] = None
+    personal_data_types: list[str] = []
+    personal_names: list[str] = []
+    primary_personal_name: Optional[str] = None
+    personal_ruts: list[str] = []
+    primary_personal_rut: Optional[str] = None
+    personal_plates: list[str] = []
+    primary_personal_plate: Optional[str] = None
+    subdomains: list[str] = []
+    reply_to_domains: list[str] = []
+    return_path_domains: list[str] = []
+    auth_domains: list[str] = []
+    tags: list[str] = []
+    whois: Optional[WhoisSummary] = None
+    evidence: SenderEvidence
+    risk: SenderRiskAssessment
+
+
+class EmailIdentificationSummary(BaseModel):
+    total_messages_analyzed: int = 0
+    spam_messages_analyzed: int = 0
+    trash_messages_analyzed: int = 0
+    unique_domains: int = 0
+    unique_companies: int = 0
+    companies_with_user_data: list[str] = []
+    chilean_companies: list[str] = []
+    international_companies: list[str] = []
+    risky_or_unnecessary_companies: list[str] = []
+    suspicious_domains: list[str] = []
+    data_brokers: list[str] = []
+    spam_domains: list[str] = []
+    trash_domains: list[str] = []
+
+
+class EmailIdentificationResponse(BaseModel):
+    provider: str
+    email_address: Optional[str] = None
+    summary: EmailIdentificationSummary
+    senders: list[IdentifiedSender] = []
+    analyzed_domains: list[str] = []
+
+
+# ── Contenedor de todas las fuentes ─────────────────────────────────────────
+
+class OSINTFuentes(BaseModel):
+    nryf_nombre: list[NRYFEntry] = []
+    nryf_rut: Optional[NRYFEntry] = None
+    servel: Optional[ServelEntry] = None
+    sii: Optional[SIIEntry] = None
+    empresas: list[EmpresaEntry] = []
+    pjud: list[PjudEntry] = []
+    diario_oficial: list[DiarioOficialEntry] = []
+    emails_publicos: list[EmailEntry] = []
+    instituciones_relacionadas: list[InstitucionEntry] = []
+    hibp: list[HibpResult] = []          # nuevo — no rompe el frontend (lo ignorará)
+
+
+# ── Resumen ──────────────────────────────────────────────────────────────────
+
+class OSINTResumen(BaseModel):
+    total_hallazgos: int = 0
+    fuentes_con_datos: list[str] = []
+    tiene_antecedentes_judiciales: bool = False
+    tiene_actividad_empresarial: bool = False
+    inscrito_servel: bool = False
+    emails_encontrados: list[str] = []
+    total_leaks: int = 0
+    advertencia: Optional[str] = None
+
+
+# ── Respuesta final ──────────────────────────────────────────────────────────
+
+class OSINTResponse(BaseModel):
+    query: str
+    rut: Optional[str] = None
+    search_id: Optional[str] = None
+    fuentes: OSINTFuentes
+    resumen: OSINTResumen
+
+
+# ── Errores por módulo (para el log interno, no se expone al front) ──────────
+
+class ModuleError(BaseModel):
+    module: str
+    error: str

@@ -1,8 +1,6 @@
 import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { Layout } from "@/components/Layout";
-import { RiskBadge } from "@/components/RiskBadge";
-import { mockSearches } from "@/data/mockData";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
@@ -10,11 +8,10 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
-import { Badge } from "@/components/ui/badge";
 import {
   Fingerprint, SlidersHorizontal, Eye, ExternalLink, Flame, History,
   Zap, Timer, Telescope, Loader2, Wifi, WifiOff,
-  Users, Vote, Building2, Gavel, BadgeCheck, Globe,
+  Users, Vote, Building2, Gavel, BadgeCheck, Globe, Mail,
   ChevronDown, ChevronUp,
 } from "lucide-react";
 
@@ -24,6 +21,7 @@ interface ServelEntry { nombre: string; rut: string; circunscripcion?: string; r
 interface EmpresaEntry { razon_social: string; rut_empresa?: string; tipo?: string; estado?: string; }
 interface PjudEntry { rol: string; tribunal: string; materia?: string; estado?: string; fecha?: string; }
 interface SIIEntry { nombre?: string; actividad?: string; contribuyente_iva?: boolean; inicio_actividades?: string; }
+interface EmailEntry { email: string; url?: string; fuente?: string; contexto?: string; }
 interface OSINTFuentes {
   nryf_nombre: NRYFEntry[];
   nryf_rut?: NRYFEntry | null;
@@ -32,6 +30,7 @@ interface OSINTFuentes {
   empresas: EmpresaEntry[];
   pjud: PjudEntry[];
   diario_oficial: { titulo: string; url: string; descripcion?: string }[];
+  emails_publicos: EmailEntry[];
 }
 interface OSINTResumen {
   total_hallazgos: number;
@@ -39,9 +38,19 @@ interface OSINTResumen {
   tiene_antecedentes_judiciales: boolean;
   tiene_actividad_empresarial: boolean;
   inscrito_servel: boolean;
+  emails_encontrados: string[];
   advertencia?: string;
 }
-interface OSINTResponse { query: string; rut?: string; fuentes: OSINTFuentes; resumen: OSINTResumen; }
+interface OSINTResponse { query: string; rut?: string; search_id?: string | null; fuentes: OSINTFuentes; resumen: OSINTResumen; }
+interface SearchHistoryItem {
+  id: string;
+  nombre: string;
+  rut?: string | null;
+  fecha: string;
+  riesgo: string;
+  hallazgos: number;
+  fuentes: number;
+}
 type BackendStatus = "checking" | "online" | "offline";
 
 // ─── Hook backend ─────────────────────────────────────────────────────────────
@@ -118,6 +127,33 @@ const Index = () => {
   const [error, setError]                   = useState<string | null>(null);
   const [osint, setOsint]                   = useState<OSINTResponse | null>(null);
   const [queryRealizada, setQueryRealizada] = useState("");
+  const [recentSearches, setRecentSearches] = useState<SearchHistoryItem[]>([]);
+  const [historyLoading, setHistoryLoading] = useState(false);
+
+  const cargarBusquedasRecientes = async () => {
+    if (backendStatus === "offline") {
+      setRecentSearches([]);
+      return;
+    }
+
+    setHistoryLoading(true);
+    try {
+      const res = await fetch("/api/searches?limit=6", {
+        signal: AbortSignal.timeout(8000),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data: SearchHistoryItem[] = await res.json();
+      setRecentSearches(data);
+    } catch {
+      setRecentSearches([]);
+    } finally {
+      setHistoryLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    void cargarBusquedasRecientes();
+  }, [backendStatus]);
 
   const handleBuscar = async () => {
     if (!nombre.trim()) return;
@@ -131,8 +167,9 @@ const Index = () => {
 
     try {
       const rutParam = rut.trim() ? `&rut=${encodeURIComponent(rut.trim())}` : "";
+      const emailParam = email.trim() ? `&email=${encodeURIComponent(email.trim())}` : "";
       const res = await fetch(
-        `/api/osint?nombre=${encodeURIComponent(nombre.trim())}${rutParam}`,
+        `/api/osint?nombre=${encodeURIComponent(nombre.trim())}${rutParam}${emailParam}`,
         { signal: AbortSignal.timeout(90_000) }
       );
       const ct = res.headers.get("content-type") ?? "";
@@ -141,6 +178,10 @@ const Index = () => {
       if (!res.ok) throw new Error((data as { detail?: string }).detail ?? `Error ${res.status}`);
       setOsint(data);
       setQueryRealizada(data.query);
+      void cargarBusquedasRecientes();
+      if (data.search_id) {
+        navigate(`/resultados/${data.search_id}`);
+      }
     } catch (e: unknown) {
       if (e instanceof DOMException && e.name === "TimeoutError")
         setError("Búsqueda demoró más de 90s. Intenta de nuevo.");
@@ -173,6 +214,12 @@ const Index = () => {
             </p>
           </div>
           <BackendIndicator status={backendStatus} />
+          <div className="flex flex-wrap justify-center gap-2 pt-1">
+            <Button variant="outline" onClick={() => navigate("/identificacion-email")}>
+              <Mail className="h-4 w-4 mr-2" />
+              Fase 1 · Identificación por correo
+            </Button>
+          </div>
         </div>
 
         {/* ── Buscador ─────────────────────────────────────────────────────── */}
@@ -255,6 +302,38 @@ const Index = () => {
           </div>
         )}
 
+        <Section title="Búsquedas Recientes" icon={<History className="h-3.5 w-3.5 text-muted-foreground" />} badge={recentSearches.length} defaultOpen={!hasResults}>
+          {historyLoading ? (
+            <div className="py-6 text-center text-sm text-muted-foreground">
+              Cargando historial...
+            </div>
+          ) : recentSearches.length === 0 ? (
+            <div className="py-6 text-center text-sm text-muted-foreground">
+              Aún no hay búsquedas guardadas.
+            </div>
+          ) : (
+            <div className="space-y-2">
+              {recentSearches.map((item) => (
+                <button
+                  key={item.id}
+                  onClick={() => navigate(`/resultados/${item.id}`)}
+                  className="w-full flex items-center gap-3 px-4 py-3 rounded-lg border border-border hover:bg-muted/30 transition-colors text-left"
+                >
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm font-medium truncate">{item.nombre}</p>
+                    <p className="text-xs text-muted-foreground mt-0.5">
+                      {item.fecha} · {item.hallazgos} hallazgos · {item.fuentes} fuentes
+                    </p>
+                  </div>
+                  <span className="text-xs text-muted-foreground border border-border px-2 py-1 rounded-full shrink-0">
+                    {item.riesgo || "Sin datos"}
+                  </span>
+                </button>
+              ))}
+            </div>
+          )}
+        </Section>
+
         {/* ── Error ────────────────────────────────────────────────────────── */}
         {error && (
           <div className="px-4 py-3 rounded-lg border border-destructive/30 bg-destructive/5 text-sm text-destructive">
@@ -317,6 +396,43 @@ const Index = () => {
                       ))}
                     </tbody>
                   </table>
+                </div>
+              </Section>
+            )}
+
+            {f.emails_publicos?.length > 0 && (
+              <Section title="Emails Asociados" icon={<Mail className="h-3.5 w-3.5 text-emerald-400" />} badge={f.emails_publicos.length}>
+                <div className="space-y-2.5">
+                  {f.emails_publicos.map((item, i) => (
+                    <div key={`${item.email}-${i}`} className="border-b border-border/40 last:border-0 pb-2.5 last:pb-0">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <a
+                          href={`mailto:${item.email}`}
+                          className="font-mono text-sm hover:text-primary transition-colors"
+                        >
+                          {item.email}
+                        </a>
+                        {item.fuente && (
+                          <span className="text-[11px] text-muted-foreground border border-border px-2 py-0.5 rounded-full">
+                            {item.fuente}
+                          </span>
+                        )}
+                        {item.url && (
+                          <a
+                            href={item.url}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="text-xs text-primary hover:underline inline-flex items-center gap-1"
+                          >
+                            Ver fuente <ExternalLink className="h-2.5 w-2.5" />
+                          </a>
+                        )}
+                      </div>
+                      {item.contexto && (
+                        <p className="text-xs text-muted-foreground mt-1.5">{item.contexto}</p>
+                      )}
+                    </div>
+                  ))}
                 </div>
               </Section>
             )}
@@ -451,7 +567,7 @@ const Index = () => {
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {mockSearches.map((s) => (
+                  {recentSearches.map((s) => (
                     <TableRow key={s.id} className="cursor-pointer hover:bg-muted/30 transition-colors border-border"
                       onClick={() => navigate(`/resultados/${s.id}`)}>
                       <TableCell className="font-medium text-sm">{s.nombre}</TableCell>
@@ -462,7 +578,11 @@ const Index = () => {
                           <span className="text-xs">{s.hallazgos}</span>
                         </span>
                       </TableCell>
-                      <TableCell><RiskBadge level={s.riesgo} /></TableCell>
+                      <TableCell>
+                        <span className="text-xs text-muted-foreground border border-border px-2 py-1 rounded-full">
+                          {s.riesgo || "Sin datos"}
+                        </span>
+                      </TableCell>
                     </TableRow>
                   ))}
                 </TableBody>

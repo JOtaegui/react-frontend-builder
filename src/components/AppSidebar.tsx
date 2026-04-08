@@ -1,6 +1,6 @@
 import { useParams, useLocation } from "react-router-dom";
 import {
-  Fingerprint, Home, BarChart3, FileSearch, ClipboardCheck, Search,
+  Fingerprint, Home, BarChart3, FileSearch, ClipboardCheck, Search, MailSearch,
 } from "lucide-react";
 import { NavLink } from "@/components/NavLink";
 import {
@@ -63,6 +63,15 @@ export function AppSidebar() {
                   <NavLink to="/resultados" end className="hover:bg-muted/50" activeClassName="bg-primary/10 text-primary font-medium">
                     <BarChart3 className="mr-2 h-4 w-4" />
                     {!collapsed && <span>Resultados</span>}
+                  </NavLink>
+                </SidebarMenuButton>
+              </SidebarMenuItem>
+
+              <SidebarMenuItem>
+                <SidebarMenuButton asChild>
+                  <NavLink to="/identificacion-email" className="hover:bg-muted/50" activeClassName="bg-primary/10 text-primary font-medium">
+                    <MailSearch className="mr-2 h-4 w-4" />
+                    {!collapsed && <span>Identificación</span>}
                   </NavLink>
                 </SidebarMenuButton>
               </SidebarMenuItem>

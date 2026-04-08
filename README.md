@@ -71,3 +71,17 @@ Yes, you can!
 To connect a domain, navigate to Project > Settings > Domains and click Connect Domain.
 
 Read more here: [Setting up a custom domain](https://docs.lovable.dev/features/custom-domain#custom-domain)
+
+## Email extraction with AI
+
+The email exposure view can optionally use Gemini to enrich personal-data detection.
+
+Add this to your local `.env`:
+
+```sh
+EMAIL_EXTRACTION_PROVIDER=gemini
+GEMINI_API_KEY=your_key_here
+GEMINI_MODEL=gemini-2.5-flash
+```
+
+If no Gemini key is configured, the backend falls back to local heuristics.
