@@ -10,6 +10,7 @@ import { Badge } from "@/components/ui/badge";
 import { Building2, Link2, Loader2, Mail, ShieldAlert, Unlink2, UserRound } from "lucide-react";
 
 type ProviderMode = "manual" | "gmail";
+type SummarySignalType = "name" | "address" | "rut" | "phone" | "plate";
 
 interface EmailIdentificationResponse {
   provider: string;
@@ -39,10 +40,17 @@ interface EmailIdentificationResponse {
     personal_data_types: string[];
     personal_names: string[];
     primary_personal_name?: string | null;
+    personal_addresses: string[];
+    primary_personal_address?: string | null;
+    personal_address_evidence: string[];
     personal_ruts: string[];
     primary_personal_rut?: string | null;
+    personal_phones: string[];
+    primary_personal_phone?: string | null;
+    personal_phone_evidence: string[];
     personal_plates: string[];
     primary_personal_plate?: string | null;
+    personal_plate_evidence: string[];
     tags: string[];
     whois?: {
       registrar?: string | null;
@@ -52,6 +60,7 @@ interface EmailIdentificationResponse {
       spam_count: number;
       trash_count: number;
       sample_subjects: string[];
+      attachment_filenames: string[];
       from_addresses: string[];
       reply_to_addresses: string[];
       return_path_addresses: string[];
@@ -94,6 +103,8 @@ const sampleMessages = JSON.stringify(
   null,
   2,
 );
+
+const READ_ALL_MESSAGES_LIMIT = "5000";
 
 function riskVariant(level: "low" | "medium" | "high") {
   if (level === "high") return "destructive";
@@ -180,6 +191,38 @@ function mostFrequentValue(values: string[]) {
   return { value: best, count: bestCount };
 }
 
+function mostProbableStructuredValue(values: string[], kind: "phone" | "plate") {
+  const counts = new Map<string, number>();
+  for (const value of values) {
+    counts.set(value, (counts.get(value) ?? 0) + 1);
+  }
+
+  let best: string | null = null;
+  let bestScore = -1;
+  let bestCount = 0;
+
+  for (const [value, count] of counts.entries()) {
+    const quality = kind === "phone"
+      ? (value.startsWith("+56 9") ? 3 : value.startsWith("+56 2") ? 1 : 0)
+      : (/^[A-Z]{4}\d{2}$/.test(value) ? 3 : /^[A-Z]{2}\d{4}$/.test(value) ? 1 : 0);
+    const score = count * 4 + quality;
+
+    if (score > bestScore || (score === bestScore && count > bestCount) || (score === bestScore && count === bestCount && value.length > (best?.length ?? 0))) {
+      best = value;
+      bestScore = score;
+      bestCount = count;
+    }
+  }
+
+  if (!best) return { value: null as string | null, count: 0 };
+  const minimumCount = kind === "phone" ? 1 : 1;
+  const minimumScore = kind === "phone" ? 7 : 5;
+  if (bestCount < minimumCount || bestScore < minimumScore) {
+    return { value: null as string | null, count: 0 };
+  }
+  return { value: best, count: bestCount };
+}
+
 function mostProbableName(values: string[]) {
   const unique = values.filter((value, index, array) => array.indexOf(value) === index);
   if (unique.length === 0) return { value: null as string | null, count: 0 };
@@ -217,6 +260,20 @@ function confidenceLabel(value: number) {
   return "Baja";
 }
 
+function availableSummarySignal(summarySignals: {
+  name: { value: string | null; count: number };
+  address: { value: string | null; count: number };
+  rut: { value: string | null; count: number };
+  phone: { value: string | null; count: number };
+  plate: { value: string | null; count: number };
+}): SummarySignalType {
+  if (summarySignals.name.value) return "name";
+  if (summarySignals.address.value) return "address";
+  if (summarySignals.rut.value) return "rut";
+  if (summarySignals.phone.value) return "phone";
+  return "plate";
+}
+
 export default function EmailIdentificacion() {
   const [provider, setProvider] = useState<ProviderMode>("gmail");
   const [emailAddress, setEmailAddress] = useState("");
@@ -229,6 +286,7 @@ export default function EmailIdentificacion() {
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<EmailIdentificationResponse | null>(null);
+  const [selectedSummarySignal, setSelectedSummarySignal] = useState<SummarySignalType>("name");
 
   const payloadPreview = useMemo(() => {
     try {
@@ -326,7 +384,7 @@ export default function EmailIdentificacion() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
-        signal: AbortSignal.timeout(90_000),
+        signal: AbortSignal.timeout(240_000),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.detail ?? `HTTP ${res.status}`);
@@ -344,7 +402,9 @@ export default function EmailIdentificacion() {
     () => (result?.senders ?? []).filter((sender) =>
       (sender.personal_data_types ?? []).length > 0 ||
       (sender.personal_names ?? []).length > 0 ||
+      (sender.personal_addresses ?? []).length > 0 ||
       (sender.personal_ruts ?? []).length > 0 ||
+      (sender.personal_phones ?? []).length > 0 ||
       (sender.personal_plates ?? []).length > 0,
     ),
     [result],
@@ -359,7 +419,11 @@ export default function EmailIdentificacion() {
   );
   const summarySignals = useMemo(() => {
     const names = (result?.senders ?? []).flatMap((sender) => sender.personal_names ?? []);
+    const addresses = (result?.senders ?? []).flatMap((sender) => (
+      sender.primary_personal_address ? [sender.primary_personal_address] : []
+    ));
     const ruts = (result?.senders ?? []).flatMap((sender) => sender.personal_ruts ?? []);
+    const phones = (result?.senders ?? []).flatMap((sender) => sender.personal_phones ?? []);
     const plates = (result?.senders ?? []).flatMap((sender) => sender.personal_plates ?? []);
     const avgConfidence = sendersWithPersonalData.length > 0
       ? sendersWithPersonalData.reduce((acc, sender) => acc + (sender.personal_data_confidence ?? 0), 0) / sendersWithPersonalData.length
@@ -367,12 +431,86 @@ export default function EmailIdentificacion() {
 
     return {
       name: mostProbableName(names),
+      address: mostFrequentValue(addresses),
       rut: mostFrequentValue(ruts),
-      plate: mostFrequentValue(plates),
+      phone: mostProbableStructuredValue(phones, "phone"),
+      plate: mostProbableStructuredValue(plates, "plate"),
       avgConfidence,
     };
   }, [result, sendersWithPersonalData]);
   const probableName = summarySignals.name.value;
+  const summaryEvidence = useMemo(() => {
+    return {
+      name: (result?.senders ?? [])
+        .filter((sender) => probableName && matchedNameVariants(sender, probableName).length > 0)
+        .map((sender) => ({
+          company: sender.company_name,
+          domain: sender.primary_domain,
+          variants: matchedNameVariants(sender, probableName),
+          locations: [
+            ...(sender.evidence.sample_subjects ?? []).slice(0, 2).map((subject) => `Correo: ${subject}`),
+            ...(sender.evidence.attachment_filenames ?? []).slice(0, 2).map((filename) => `Adjunto: ${filename}`),
+          ],
+          evidence: ["Detectado en el contenido analizado del correo."],
+        })),
+      address: (result?.senders ?? [])
+        .filter((sender) => summarySignals.address.value && (sender.personal_addresses ?? []).includes(summarySignals.address.value))
+        .map((sender) => ({
+          company: sender.company_name,
+          domain: sender.primary_domain,
+          variants: [summarySignals.address.value as string],
+          locations: [
+            ...(sender.evidence.sample_subjects ?? []).slice(0, 2).map((subject) => `Correo: ${subject}`),
+            ...(sender.evidence.attachment_filenames ?? []).slice(0, 2).map((filename) => `Adjunto: ${filename}`),
+          ],
+          evidence: (sender.personal_address_evidence ?? []).slice(0, 3).length > 0
+            ? (sender.personal_address_evidence ?? []).slice(0, 3)
+            : ["Detectado en el contenido analizado del correo."],
+        })),
+      rut: (result?.senders ?? [])
+        .filter((sender) => summarySignals.rut.value && (sender.personal_ruts ?? []).includes(summarySignals.rut.value))
+        .map((sender) => ({
+          company: sender.company_name,
+          domain: sender.primary_domain,
+          variants: [summarySignals.rut.value as string],
+          locations: [
+            ...(sender.evidence.sample_subjects ?? []).slice(0, 2).map((subject) => `Correo: ${subject}`),
+            ...(sender.evidence.attachment_filenames ?? []).slice(0, 2).map((filename) => `Adjunto: ${filename}`),
+          ],
+          evidence: ["Detectado en el contenido analizado del correo."],
+        })),
+      phone: (result?.senders ?? [])
+        .filter((sender) => summarySignals.phone.value && (sender.personal_phones ?? []).includes(summarySignals.phone.value))
+        .map((sender) => ({
+          company: sender.company_name,
+          domain: sender.primary_domain,
+          variants: [summarySignals.phone.value as string],
+          locations: [
+            ...(sender.evidence.sample_subjects ?? []).slice(0, 2).map((subject) => `Correo: ${subject}`),
+            ...(sender.evidence.attachment_filenames ?? []).slice(0, 2).map((filename) => `Adjunto: ${filename}`),
+          ],
+          evidence: (sender.personal_phone_evidence ?? []).slice(0, 3).length > 0
+            ? (sender.personal_phone_evidence ?? []).slice(0, 3)
+            : ["Detectado en el contenido analizado del correo."],
+        })),
+      plate: (result?.senders ?? [])
+        .filter((sender) => summarySignals.plate.value && (sender.personal_plates ?? []).includes(summarySignals.plate.value))
+        .map((sender) => ({
+          company: sender.company_name,
+          domain: sender.primary_domain,
+          variants: [summarySignals.plate.value as string],
+          locations: [
+            ...(sender.evidence.sample_subjects ?? []).slice(0, 2).map((subject) => `Correo: ${subject}`),
+            ...(sender.evidence.attachment_filenames ?? []).slice(0, 2).map((filename) => `Adjunto: ${filename}`),
+          ],
+          evidence: (sender.personal_plate_evidence ?? []).slice(0, 3),
+        })),
+    };
+  }, [probableName, result, summarySignals.address.value, summarySignals.phone.value, summarySignals.plate.value, summarySignals.rut.value]);
+
+  useEffect(() => {
+    setSelectedSummarySignal(availableSummarySignal(summarySignals));
+  }, [summarySignals]);
 
   return (
     <Layout>
@@ -404,14 +542,37 @@ export default function EmailIdentificacion() {
               </div>
 
               <div className="space-y-2">
-                <Label htmlFor="maxMessages">Mensajes a revisar</Label>
-                <Input
-                  id="maxMessages"
-                  value={maxMessages}
-                  onChange={(event) => setMaxMessages(event.target.value)}
-                  inputMode="numeric"
-                  className="h-12 text-base"
-                />
+                <div className="flex items-center justify-between gap-3">
+                  <Label htmlFor="maxMessages">Mensajes a revisar</Label>
+                  <Button
+                    type="button"
+                    variant={maxMessages === READ_ALL_MESSAGES_LIMIT ? "default" : "outline"}
+                    onClick={() => setMaxMessages(READ_ALL_MESSAGES_LIMIT)}
+                    className={maxMessages === READ_ALL_MESSAGES_LIMIT ? "bg-emerald-500 text-white hover:bg-emerald-600" : ""}
+                  >
+                    Leer todos los mensajes
+                  </Button>
+                </div>
+                <div className="flex flex-col gap-3 sm:flex-row">
+                  <Input
+                    id="maxMessages"
+                    value={maxMessages === READ_ALL_MESSAGES_LIMIT ? "" : maxMessages}
+                    onChange={(event) => setMaxMessages(event.target.value.replace(/[^\d]/g, ""))}
+                    inputMode="numeric"
+                    placeholder={maxMessages === READ_ALL_MESSAGES_LIMIT ? "Leyendo todos los mensajes" : "150"}
+                    className="h-12 flex-1 text-base"
+                  />
+                  {maxMessages === READ_ALL_MESSAGES_LIMIT && (
+                    <Button type="button" variant="outline" onClick={() => setMaxMessages("150")} className="h-12 sm:w-auto">
+                      Usar limite manual
+                    </Button>
+                  )}
+                </div>
+                <div className="text-xs text-muted-foreground">
+                  {maxMessages === READ_ALL_MESSAGES_LIMIT
+                    ? "Se intentaran revisar todos los mensajes disponibles de la cuenta."
+                    : "Tambien puedes indicar un numero exacto de mensajes a revisar."}
+                </div>
               </div>
 
               {provider === "gmail" ? (
@@ -614,8 +775,33 @@ export default function EmailIdentificacion() {
                           </div>
                         </div>
 
-                        {((sender.personal_ruts ?? []).length > 0 || (sender.personal_plates ?? []).length > 0) && (
-                          <div className="mt-4 grid gap-5 lg:grid-cols-2">
+                        {((sender.personal_addresses ?? []).length > 0 || (sender.personal_ruts ?? []).length > 0 || (sender.personal_phones ?? []).length > 0 || (sender.personal_plates ?? []).length > 0) && (
+                          <div className="mt-4 grid gap-5 lg:grid-cols-2 xl:grid-cols-4">
+                            {(sender.personal_addresses ?? []).length > 0 && (
+                              <div className="rounded-2xl border border-emerald-500/12 bg-background/80 p-4">
+                                <div className="text-xs font-medium uppercase tracking-[0.16em] text-muted-foreground">Direccion personal</div>
+                                <div className="mt-2 flex flex-wrap gap-2">
+                                  {sender.primary_personal_address && (
+                                    <Badge variant="outline" className="border-emerald-500/30 text-xs">
+                                      {sender.primary_personal_address}
+                                    </Badge>
+                                  )}
+                                </div>
+                                {(sender.personal_address_evidence ?? []).length > 0 && (
+                                  <div className="mt-3 space-y-2">
+                                    <div className="text-[11px] uppercase tracking-[0.16em] text-muted-foreground">Donde se encontro</div>
+                                    <div className="space-y-2">
+                                      {(sender.personal_address_evidence ?? []).slice(0, 3).map((snippet) => (
+                                        <div key={snippet} className="rounded-xl border border-emerald-500/12 bg-emerald-500/[0.04] px-3 py-2 text-xs text-muted-foreground">
+                                          {snippet}
+                                        </div>
+                                      ))}
+                                    </div>
+                                  </div>
+                                )}
+                              </div>
+                            )}
+
                             {(sender.personal_ruts ?? []).length > 0 && (
                               <div className="rounded-2xl border border-emerald-500/12 bg-background/80 p-4">
                                 <div className="text-xs font-medium uppercase tracking-[0.16em] text-muted-foreground">RUT más probable</div>
@@ -629,6 +815,31 @@ export default function EmailIdentificacion() {
                               </div>
                             )}
 
+                            {(sender.personal_phones ?? []).length > 0 && (
+                              <div className="rounded-2xl border border-emerald-500/12 bg-background/80 p-4">
+                                <div className="text-xs font-medium uppercase tracking-[0.16em] text-muted-foreground">Telefono más probable</div>
+                                <div className="mt-2 flex flex-wrap gap-2">
+                                  {sender.primary_personal_phone && (
+                                    <Badge variant="outline" className="border-emerald-500/30 font-mono text-xs">
+                                      {sender.primary_personal_phone}
+                                    </Badge>
+                                  )}
+                                </div>
+                                {(sender.personal_phone_evidence ?? []).length > 0 && (
+                                  <div className="mt-3 space-y-2">
+                                    <div className="text-[11px] uppercase tracking-[0.16em] text-muted-foreground">Donde se encontro</div>
+                                    <div className="space-y-2">
+                                      {(sender.personal_phone_evidence ?? []).slice(0, 3).map((snippet) => (
+                                        <div key={snippet} className="rounded-xl border border-emerald-500/12 bg-emerald-500/[0.04] px-3 py-2 text-xs text-muted-foreground">
+                                          {snippet}
+                                        </div>
+                                      ))}
+                                    </div>
+                                  </div>
+                                )}
+                              </div>
+                            )}
+
                             {(sender.personal_plates ?? []).length > 0 && (
                               <div className="rounded-2xl border border-emerald-500/12 bg-background/80 p-4">
                                 <div className="text-xs font-medium uppercase tracking-[0.16em] text-muted-foreground">Patente más probable</div>
@@ -639,6 +850,18 @@ export default function EmailIdentificacion() {
                                     </Badge>
                                   )}
                                 </div>
+                                {(sender.personal_plate_evidence ?? []).length > 0 && (
+                                  <div className="mt-3 space-y-2">
+                                    <div className="text-[11px] uppercase tracking-[0.16em] text-muted-foreground">Donde se encontro</div>
+                                    <div className="space-y-2">
+                                      {(sender.personal_plate_evidence ?? []).slice(0, 3).map((snippet) => (
+                                        <div key={snippet} className="rounded-xl border border-emerald-500/12 bg-emerald-500/[0.04] px-3 py-2 text-xs text-muted-foreground">
+                                          {snippet}
+                                        </div>
+                                      ))}
+                                    </div>
+                                  </div>
+                                )}
                               </div>
                             )}
                           </div>
@@ -657,6 +880,19 @@ export default function EmailIdentificacion() {
                               {(sender.evidence.sample_subjects ?? []).slice(0, 3).map((subject) => (
                                 <Badge key={subject} variant="outline" className="max-w-full border-emerald-500/20 bg-background/90 text-xs">
                                   {subject}
+                                </Badge>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+
+                        {(sender.evidence.attachment_filenames ?? []).length > 0 && (
+                          <div className="mt-4 rounded-2xl border border-emerald-500/12 bg-background/80 p-4">
+                            <div className="text-xs font-medium uppercase tracking-[0.16em] text-muted-foreground">Adjuntos revisados</div>
+                            <div className="mt-3 flex flex-wrap gap-2">
+                              {(sender.evidence.attachment_filenames ?? []).slice(0, 6).map((filename) => (
+                                <Badge key={filename} variant="outline" className="max-w-full border-emerald-500/20 bg-background/90 text-xs">
+                                  {filename}
                                 </Badge>
                               ))}
                             </div>
@@ -690,29 +926,125 @@ export default function EmailIdentificacion() {
                       </Badge>
                     </div>
 
-                    <div className="grid gap-4 xl:grid-cols-3">
-                      <div className="rounded-3xl border border-emerald-500/15 bg-background/90 p-6 shadow-sm">
+                    <div className="grid gap-4 xl:grid-cols-5">
+                      <button
+                        type="button"
+                        onClick={() => setSelectedSummarySignal("name")}
+                        className={`rounded-3xl border bg-background/90 p-6 text-left shadow-sm transition ${selectedSummarySignal === "name" ? "border-emerald-500/40 ring-2 ring-emerald-500/20" : "border-emerald-500/15"}`}
+                      >
                         <div className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">Nombre más probable</div>
                         <div className="mt-3 text-2xl font-semibold">{summarySignals.name.value ?? "Sin confirmar"}</div>
                         <div className="mt-2 text-sm text-muted-foreground">
                           Detectado en {summarySignals.name.count} coincidencia{summarySignals.name.count === 1 ? "" : "s"}.
                         </div>
-                      </div>
+                      </button>
 
-                      <div className="rounded-3xl border border-emerald-500/15 bg-background/90 p-6 shadow-sm">
+                      <button
+                        type="button"
+                        onClick={() => setSelectedSummarySignal("address")}
+                        className={`rounded-3xl border bg-background/90 p-6 text-left shadow-sm transition ${selectedSummarySignal === "address" ? "border-emerald-500/40 ring-2 ring-emerald-500/20" : "border-emerald-500/15"}`}
+                      >
+                        <div className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">Direccion más probable</div>
+                        <div className="mt-3 text-2xl font-semibold">{summarySignals.address.value ?? "Sin confirmar"}</div>
+                        <div className="mt-2 text-sm text-muted-foreground">
+                          {summarySignals.address.value ? `Detectada en ${summarySignals.address.count} coincidencia${summarySignals.address.count === 1 ? "" : "s"}.` : "No hubo una direccion validada suficiente."}
+                        </div>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => setSelectedSummarySignal("rut")}
+                        className={`rounded-3xl border bg-background/90 p-6 text-left shadow-sm transition ${selectedSummarySignal === "rut" ? "border-emerald-500/40 ring-2 ring-emerald-500/20" : "border-emerald-500/15"}`}
+                      >
                         <div className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">RUT más probable</div>
                         <div className="mt-3 text-2xl font-semibold">{summarySignals.rut.value ?? "Sin confirmar"}</div>
                         <div className="mt-2 text-sm text-muted-foreground">
                           {summarySignals.rut.value ? `Detectado en ${summarySignals.rut.count} coincidencia${summarySignals.rut.count === 1 ? "" : "s"}.` : "No hubo un RUT validado suficiente."}
                         </div>
-                      </div>
+                      </button>
 
-                      <div className="rounded-3xl border border-emerald-500/15 bg-background/90 p-6 shadow-sm">
+                      <button
+                        type="button"
+                        onClick={() => setSelectedSummarySignal("phone")}
+                        className={`rounded-3xl border bg-background/90 p-6 text-left shadow-sm transition ${selectedSummarySignal === "phone" ? "border-emerald-500/40 ring-2 ring-emerald-500/20" : "border-emerald-500/15"}`}
+                      >
+                        <div className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">Telefono más probable</div>
+                        <div className="mt-3 text-2xl font-semibold">{summarySignals.phone.value ?? "Sin confirmar"}</div>
+                        <div className="mt-2 text-sm text-muted-foreground">
+                          {summarySignals.phone.value ? `Detectado en ${summarySignals.phone.count} coincidencia${summarySignals.phone.count === 1 ? "" : "s"}.` : "No hubo un telefono validado suficiente."}
+                        </div>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => setSelectedSummarySignal("plate")}
+                        className={`rounded-3xl border bg-background/90 p-6 text-left shadow-sm transition ${selectedSummarySignal === "plate" ? "border-emerald-500/40 ring-2 ring-emerald-500/20" : "border-emerald-500/15"}`}
+                      >
                         <div className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">Patente más probable</div>
                         <div className="mt-3 text-2xl font-semibold">{summarySignals.plate.value ?? "Sin confirmar"}</div>
                         <div className="mt-2 text-sm text-muted-foreground">
                           {summarySignals.plate.value ? `Detectada en ${summarySignals.plate.count} coincidencia${summarySignals.plate.count === 1 ? "" : "s"}.` : "No hubo una patente con contexto suficiente."}
                         </div>
+                      </button>
+                    </div>
+
+                    <div className="rounded-3xl border border-emerald-500/15 bg-background/90 p-6 shadow-sm">
+                      <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+                        <div>
+                          <div className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">Dónde se encontró</div>
+                          <div className="mt-1 text-lg font-semibold">
+                            {selectedSummarySignal === "name" && (summarySignals.name.value ?? "Sin confirmar")}
+                            {selectedSummarySignal === "address" && (summarySignals.address.value ?? "Sin confirmar")}
+                            {selectedSummarySignal === "rut" && (summarySignals.rut.value ?? "Sin confirmar")}
+                            {selectedSummarySignal === "phone" && (summarySignals.phone.value ?? "Sin confirmar")}
+                            {selectedSummarySignal === "plate" && (summarySignals.plate.value ?? "Sin confirmar")}
+                          </div>
+                        </div>
+                        <Badge variant="outline" className="w-fit border-emerald-500/25">
+                          {selectedSummarySignal === "name" ? "Nombre" : selectedSummarySignal === "address" ? "Direccion" : selectedSummarySignal === "rut" ? "RUT" : selectedSummarySignal === "phone" ? "Telefono" : "Patente"}
+                        </Badge>
+                      </div>
+
+                      <div className="mt-4 space-y-3">
+                        {(selectedSummarySignal === "name" ? summaryEvidence.name : selectedSummarySignal === "address" ? summaryEvidence.address : selectedSummarySignal === "rut" ? summaryEvidence.rut : selectedSummarySignal === "phone" ? summaryEvidence.phone : summaryEvidence.plate).length > 0 ? (
+                          (selectedSummarySignal === "name" ? summaryEvidence.name : selectedSummarySignal === "address" ? summaryEvidence.address : selectedSummarySignal === "rut" ? summaryEvidence.rut : selectedSummarySignal === "phone" ? summaryEvidence.phone : summaryEvidence.plate).map((entry) => (
+                            <div key={`${selectedSummarySignal}-${entry.company}-${entry.domain}`} className="rounded-2xl border border-emerald-500/12 bg-emerald-500/[0.04] p-4">
+                              <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+                                <div>
+                                  <div className="font-medium">{entry.company}</div>
+                                  <div className="text-xs text-muted-foreground">{entry.domain}</div>
+                                </div>
+                                <div className="flex flex-wrap gap-2">
+                                  {entry.variants.map((variant) => (
+                                    <Badge key={variant} variant="secondary" className="bg-emerald-500/15 text-emerald-700 dark:text-emerald-300">
+                                      {variant}
+                                    </Badge>
+                                  ))}
+                                </div>
+                              </div>
+
+                              <div className="mt-3 space-y-2 text-sm text-muted-foreground">
+                                {entry.evidence.map((item) => (
+                                  <div key={item}>{item}</div>
+                                ))}
+                              </div>
+
+                              {entry.locations.length > 0 && (
+                                <div className="mt-3 flex flex-wrap gap-2">
+                                  {entry.locations.map((location) => (
+                                    <Badge key={location} variant="outline" className="border-emerald-500/20 bg-background/90 text-xs">
+                                      {location}
+                                    </Badge>
+                                  ))}
+                                </div>
+                              )}
+                            </div>
+                          ))
+                        ) : (
+                          <div className="rounded-2xl border border-emerald-500/12 bg-emerald-500/[0.04] p-4 text-sm text-muted-foreground">
+                            No hay evidencia suficiente para ese dato en el resumen actual.
+                          </div>
+                        )}
                       </div>
                     </div>
 

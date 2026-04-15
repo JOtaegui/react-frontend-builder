@@ -106,6 +106,7 @@ class AuthorizedEmailMessage(BaseModel):
     snippet: Optional[str] = None
     body_text: Optional[str] = None
     body_html: Optional[str] = None
+    attachment_filenames: list[str] = []
     headers: list[EmailHeaderKV] = []
 
 
@@ -124,6 +125,7 @@ class SenderEvidence(BaseModel):
     first_seen: Optional[str] = None
     last_seen: Optional[str] = None
     sample_subjects: list[str] = []
+    attachment_filenames: list[str] = []
     from_addresses: list[str] = []
     reply_to_addresses: list[str] = []
     return_path_addresses: list[str] = []
@@ -160,10 +162,17 @@ class IdentifiedSender(BaseModel):
     personal_data_types: list[str] = []
     personal_names: list[str] = []
     primary_personal_name: Optional[str] = None
+    personal_addresses: list[str] = []
+    primary_personal_address: Optional[str] = None
+    personal_address_evidence: list[str] = []
     personal_ruts: list[str] = []
     primary_personal_rut: Optional[str] = None
+    personal_phones: list[str] = []
+    primary_personal_phone: Optional[str] = None
+    personal_phone_evidence: list[str] = []
     personal_plates: list[str] = []
     primary_personal_plate: Optional[str] = None
+    personal_plate_evidence: list[str] = []
     subdomains: list[str] = []
     reply_to_domains: list[str] = []
     return_path_domains: list[str] = []

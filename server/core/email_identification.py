@@ -14,11 +14,16 @@ from typing import Any, Iterable, Optional
 import httpx
 from config import EMAIL_EXTRACTION_PROVIDER, GEMINI_API_KEY, GEMINI_MODEL
 from core.personal_data import (
-    extract_chilean_plates,
+    address_fingerprint,
+    extract_chilean_address_matches,
+    extract_chilean_plate_matches,
+    extract_chilean_phone_matches,
     extract_chilean_ruts,
     extract_name_candidates,
+    select_primary_address,
     select_primary_name,
     select_primary_plate,
+    select_primary_phone,
     select_primary_rut,
 )
 
@@ -170,13 +175,22 @@ class SenderAggregate:
     tags: set[str] = field(default_factory=set)
     personal_data_types: set[str] = field(default_factory=set)
     personal_names: set[str] = field(default_factory=set)
+    personal_addresses: set[str] = field(default_factory=set)
+    personal_address_display_by_fingerprint: dict[str, str] = field(default_factory=dict)
+    personal_address_counts: dict[str, int] = field(default_factory=dict)
+    personal_address_scores: dict[str, int] = field(default_factory=dict)
+    personal_address_evidence: list[str] = field(default_factory=list)
     personal_ruts: set[str] = field(default_factory=set)
+    personal_phones: set[str] = field(default_factory=set)
+    personal_phone_evidence: list[str] = field(default_factory=list)
     personal_plates: set[str] = field(default_factory=set)
+    personal_plate_evidence: list[str] = field(default_factory=list)
     message_count: int = 0
     spam_count: int = 0
     trash_count: int = 0
     sample_subjects: list[str] = field(default_factory=list)
     sample_contents: list[str] = field(default_factory=list)
+    attachment_filenames: set[str] = field(default_factory=set)
     from_addresses: set[str] = field(default_factory=set)
     reply_to_addresses: set[str] = field(default_factory=set)
     return_path_addresses: set[str] = field(default_factory=set)
@@ -283,25 +297,50 @@ async def identify_email_footprint(
 
 async def _fetch_gmail_messages(access_token: str, max_messages: int) -> list[AuthorizedEmailMessage]:
     headers = {"Authorization": f"Bearer {access_token}"}
-    timeout = httpx.Timeout(20.0, connect=10.0)
+    timeout = httpx.Timeout(45.0, connect=10.0)
     async with httpx.AsyncClient(timeout=timeout, headers=headers) as client:
-        listing = await client.get(
-            f"{GMAIL_API_BASE}/messages",
-            params={"maxResults": min(max_messages, 500), "includeSpamTrash": "true"},
-        )
-        listing.raise_for_status()
-        message_refs = listing.json().get("messages", [])
+        message_refs: list[dict[str, Any]] = []
+        next_page_token: str | None = None
 
-        messages: list[AuthorizedEmailMessage] = []
-        for message_ref in message_refs[:max_messages]:
-            response = await client.get(
-                f"{GMAIL_API_BASE}/messages/{message_ref['id']}",
-                params={"format": "full"},
+        while len(message_refs) < max_messages:
+            listing = await client.get(
+                f"{GMAIL_API_BASE}/messages",
+                params={
+                    "maxResults": min(max_messages - len(message_refs), 500),
+                    "includeSpamTrash": "true",
+                    **({"pageToken": next_page_token} if next_page_token else {}),
+                },
             )
-            response.raise_for_status()
-            payload = response.json()
-            messages.append(_gmail_to_authorized_message(payload))
+            listing.raise_for_status()
+            payload = listing.json()
+            message_refs.extend(payload.get("messages", []) or [])
+            next_page_token = payload.get("nextPageToken")
+            if not next_page_token:
+                break
 
+        selected_refs = message_refs[:max_messages]
+        semaphore = asyncio.Semaphore(12)
+
+        async def fetch_one(message_ref: dict[str, Any]) -> AuthorizedEmailMessage | None:
+            message_id = message_ref.get("id")
+            if not message_id:
+                return None
+            async with semaphore:
+                response = await client.get(
+                    f"{GMAIL_API_BASE}/messages/{message_id}",
+                    params={"format": "full"},
+                )
+                response.raise_for_status()
+                payload = response.json()
+                return _gmail_to_authorized_message(payload)
+
+        results = await asyncio.gather(*(fetch_one(ref) for ref in selected_refs), return_exceptions=True)
+
+    messages: list[AuthorizedEmailMessage] = []
+    for result in results:
+        if isinstance(result, Exception) or result is None:
+            continue
+        messages.append(result)
     return messages
 
 
@@ -447,6 +486,7 @@ def _gmail_to_authorized_message(payload: dict[str, Any]) -> AuthorizedEmailMess
     subject = _header_lookup(headers, "Subject")
     snippet = payload.get("snippet")
     body_text, body_html = _extract_gmail_bodies(payload.get("payload", {}))
+    attachment_filenames = _extract_gmail_attachment_filenames(payload.get("payload", {}))
     received_at = _gmail_internal_date_to_iso(payload.get("internalDate"))
     return AuthorizedEmailMessage(
         provider_message_id=payload.get("id"),
@@ -457,6 +497,7 @@ def _gmail_to_authorized_message(payload: dict[str, Any]) -> AuthorizedEmailMess
         snippet=snippet,
         body_text=body_text,
         body_html=body_html,
+        attachment_filenames=attachment_filenames,
         headers=headers,
     )
 
@@ -484,6 +525,24 @@ def _extract_gmail_bodies(payload: dict[str, Any]) -> tuple[Optional[str], Optio
         "\n".join(part.strip() for part in text_parts if part.strip()) or None,
         "\n".join(part.strip() for part in html_parts if part.strip()) or None,
     )
+
+
+def _extract_gmail_attachment_filenames(payload: dict[str, Any]) -> list[str]:
+    filenames: list[str] = []
+    seen: set[str] = set()
+
+    def walk(part: dict[str, Any]) -> None:
+        filename = (part.get("filename") or "").strip()
+        body = part.get("body", {}) or {}
+        has_attachment = bool(filename and body.get("attachmentId"))
+        if has_attachment and filename not in seen:
+            seen.add(filename)
+            filenames.append(filename)
+        for child in part.get("parts", []) or []:
+            walk(child)
+
+    walk(payload)
+    return filenames[:10]
 
 
 def _decode_base64url(value: str) -> Optional[str]:
@@ -521,13 +580,19 @@ def _parse_message(message: AuthorizedEmailMessage) -> dict[str, Any]:
     reply_to_domains = [domain for domain in (_normalize_domain(item) for item in raw_reply_to_domains) if domain]
     return_path_domains = [domain for domain in (_normalize_domain(item) for item in raw_return_path_domains) if domain]
     auth_domains = _extract_auth_domains(headers)
+    attachment_filenames = [name.strip() for name in (message.attachment_filenames or []) if name and name.strip()]
 
     primary_domain = next((domain for domain in from_domains if domain), None)
     subject = (message.subject or headers.get("subject") or "").strip()
-    content = " ".join(filter(None, [subject, message.snippet, message.body_text, _strip_html(message.body_html or "")]))
+    attachment_text = " ".join(f"Adjunto {filename}" for filename in attachment_filenames)
+    content = " ".join(filter(None, [subject, message.snippet, message.body_text, _strip_html(message.body_html or ""), attachment_text]))
     content_lower = content.lower()
     all_domains = {domain for domain in from_domains + reply_to_domains + return_path_domains + auth_domains if domain}
     label_ids = [label.upper() for label in (message.label_ids or [])]
+
+    address_matches = extract_chilean_address_matches(content)
+    phone_matches = extract_chilean_phone_matches(content)
+    plate_matches = extract_chilean_plate_matches(content)
 
     return {
         "from_addresses": from_addresses,
@@ -537,6 +602,7 @@ def _parse_message(message: AuthorizedEmailMessage) -> dict[str, Any]:
         "reply_to_domains": reply_to_domains,
         "return_path_domains": return_path_domains,
         "auth_domains": auth_domains,
+        "attachment_filenames": attachment_filenames,
         "subject": subject,
         "content_excerpt": content[:4000],
         "received_at": message.received_at,
@@ -551,8 +617,15 @@ def _parse_message(message: AuthorizedEmailMessage) -> dict[str, Any]:
         "all_domains": all_domains,
         "personal_data_types": _detect_personal_data_types(content_lower),
         "personal_names": extract_name_candidates(content),
+        "personal_addresses": [match.address for match in address_matches],
+        "personal_address_fingerprints": {match.address: address_fingerprint(match.address) for match in address_matches},
+        "personal_address_scores": {match.address: match.score for match in address_matches},
+        "personal_address_evidence": [match.evidence for match in address_matches],
         "personal_ruts": extract_chilean_ruts(content),
-        "personal_plates": extract_chilean_plates(content),
+        "personal_phones": [match.phone for match in phone_matches],
+        "personal_phone_evidence": [match.evidence for match in phone_matches],
+        "personal_plates": [match.plate for match in plate_matches],
+        "personal_plate_evidence": [match.evidence for match in plate_matches],
         "newsletter": any(hint in content_lower for hint in NEWSLETTER_HINTS),
         "marketing": any(word in content_lower for word in ("descuento", "oferta", "promo", "sale", "cyber", "black friday")),
     }
@@ -574,11 +647,31 @@ def _merge_message(record: SenderAggregate, parsed: dict[str, Any]) -> None:
     record.reply_to_domains.update(parsed["reply_to_domains"])
     record.return_path_domains.update(parsed["return_path_domains"])
     record.auth_domains.update(parsed["auth_domains"])
+    record.attachment_filenames.update(parsed["attachment_filenames"])
     record.subdomains.update(parsed["subdomains"])
     record.personal_data_types.update(parsed["personal_data_types"])
     record.personal_names.update(parsed["personal_names"])
+    for address in parsed["personal_addresses"]:
+        fingerprint = parsed["personal_address_fingerprints"].get(address) or address_fingerprint(address)
+        record.personal_address_counts[fingerprint] = record.personal_address_counts.get(fingerprint, 0) + 1
+        previous_display = record.personal_address_display_by_fingerprint.get(fingerprint)
+        record.personal_address_display_by_fingerprint[fingerprint] = _choose_better_address_display(previous_display, address)
+        record.personal_addresses.add(record.personal_address_display_by_fingerprint[fingerprint])
+    for address, score in parsed["personal_address_scores"].items():
+        fingerprint = parsed["personal_address_fingerprints"].get(address) or address_fingerprint(address)
+        record.personal_address_scores[fingerprint] = max(score, record.personal_address_scores.get(fingerprint, 0))
+    for evidence in parsed["personal_address_evidence"]:
+        if evidence not in record.personal_address_evidence and len(record.personal_address_evidence) < 5:
+            record.personal_address_evidence.append(evidence)
     record.personal_ruts.update(parsed["personal_ruts"])
+    record.personal_phones.update(parsed["personal_phones"])
+    for evidence in parsed["personal_phone_evidence"]:
+        if evidence not in record.personal_phone_evidence and len(record.personal_phone_evidence) < 5:
+            record.personal_phone_evidence.append(evidence)
     record.personal_plates.update(parsed["personal_plates"])
+    for evidence in parsed["personal_plate_evidence"]:
+        if evidence not in record.personal_plate_evidence and len(record.personal_plate_evidence) < 5:
+            record.personal_plate_evidence.append(evidence)
 
     subject = parsed["subject"]
     if subject and subject not in record.sample_subjects and len(record.sample_subjects) < 5:
@@ -588,8 +681,12 @@ def _merge_message(record: SenderAggregate, parsed: dict[str, Any]) -> None:
         record.sample_contents.append(content_excerpt)
     if record.personal_names:
         record.personal_data_types.add("nombre")
+    if record.personal_addresses:
+        record.personal_data_types.add("direccion")
     if record.personal_ruts:
         record.personal_data_types.add("rut")
+    if record.personal_phones:
+        record.personal_data_types.add("telefono")
     if record.personal_plates:
         record.personal_data_types.add("patente")
 
@@ -681,6 +778,30 @@ def _to_identified_sender(sender: SenderAggregate) -> IdentifiedSender:
     if sender.message_count >= 15 and level == "medium":
         sender.risk_reasons.add("Frecuencia muy alta de correos")
 
+    if sender.personal_address_display_by_fingerprint:
+        ordered_fingerprints = sorted(
+            sender.personal_address_display_by_fingerprint.keys(),
+            key=lambda fingerprint: (
+                -(sender.personal_address_counts.get(fingerprint, 0)),
+                -(sender.personal_address_scores.get(fingerprint, 0)),
+                -_address_display_rank(sender.personal_address_display_by_fingerprint[fingerprint]),
+                sender.personal_address_display_by_fingerprint[fingerprint].lower(),
+            ),
+        )
+        ordered_addresses = [sender.personal_address_display_by_fingerprint[fingerprint] for fingerprint in ordered_fingerprints]
+        address_counts_by_value = {
+            sender.personal_address_display_by_fingerprint[fingerprint]: sender.personal_address_counts.get(fingerprint, 0)
+            for fingerprint in ordered_fingerprints
+        }
+        address_scores_by_value = {
+            sender.personal_address_display_by_fingerprint[fingerprint]: sender.personal_address_scores.get(fingerprint, 0)
+            for fingerprint in ordered_fingerprints
+        }
+        primary_address = select_primary_address(ordered_addresses, address_counts_by_value, address_scores_by_value)
+    else:
+        ordered_addresses = sorted(sender.personal_addresses)
+        primary_address = select_primary_address(ordered_addresses)
+
     return IdentifiedSender(
         company_name=sender.company_name,
         normalized_domain=sender.normalized_domain,
@@ -694,10 +815,17 @@ def _to_identified_sender(sender: SenderAggregate) -> IdentifiedSender:
         personal_data_types=sorted(sender.personal_data_types),
         personal_names=sorted(sender.personal_names),
         primary_personal_name=select_primary_name(sorted(sender.personal_names)),
+        personal_addresses=ordered_addresses,
+        primary_personal_address=primary_address,
+        personal_address_evidence=sender.personal_address_evidence,
         personal_ruts=sorted(sender.personal_ruts),
         primary_personal_rut=select_primary_rut(sorted(sender.personal_ruts)),
+        personal_phones=sorted(sender.personal_phones),
+        primary_personal_phone=select_primary_phone(sorted(sender.personal_phones)),
+        personal_phone_evidence=sender.personal_phone_evidence,
         personal_plates=sorted(sender.personal_plates),
         primary_personal_plate=select_primary_plate(sorted(sender.personal_plates)),
+        personal_plate_evidence=sender.personal_plate_evidence,
         subdomains=sorted(sender.subdomains),
         reply_to_domains=sorted(sender.reply_to_domains),
         return_path_domains=sorted(sender.return_path_domains),
@@ -711,6 +839,7 @@ def _to_identified_sender(sender: SenderAggregate) -> IdentifiedSender:
             first_seen=sender.first_seen,
             last_seen=sender.last_seen,
             sample_subjects=sender.sample_subjects,
+            attachment_filenames=sorted(sender.attachment_filenames),
             from_addresses=sorted(sender.from_addresses),
             reply_to_addresses=sorted(sender.reply_to_addresses),
             return_path_addresses=sorted(sender.return_path_addresses),
@@ -885,6 +1014,31 @@ def _dedupe_preserve_order(values: Iterable[str]) -> list[str]:
     return result
 
 
+def _choose_better_address_display(current: Optional[str], candidate: str) -> str:
+    if not current:
+        return candidate
+    current_rank = _address_display_rank(current)
+    candidate_rank = _address_display_rank(candidate)
+    if candidate_rank > current_rank:
+        return candidate
+    if candidate_rank == current_rank and len(candidate) > len(current):
+        return candidate
+    return current
+
+
+def _address_display_rank(value: str) -> int:
+    normalized = value.lower()
+    rank = 0
+    if re.search(r"\b(comuna|region|santiago|rm|metropolitana)\b", normalized):
+        rank += 2
+    if re.search(r"\b(depto|departamento|dpto|oficina|of)\b", normalized):
+        rank += 1
+    if re.search(r"\d{1,5}", normalized):
+        rank += 1
+    rank += min(len(value) // 20, 2)
+    return rank
+
+
 def _detect_personal_data_types(content_lower: str) -> list[str]:
     found: list[str] = []
     for label, patterns in PERSONAL_DATA_PATTERNS:
@@ -897,10 +1051,14 @@ def _personal_data_confidence(sender: SenderAggregate) -> float:
     score = 0.0
     if sender.personal_names:
         score += 0.3
+    if sender.personal_addresses:
+        score += 0.28
     if sender.personal_ruts:
         score += 0.45
+    if sender.personal_phones:
+        score += 0.25
     if sender.personal_plates:
         score += 0.35
-    if sender.message_count >= 2 and (sender.personal_names or sender.personal_ruts or sender.personal_plates):
+    if sender.message_count >= 2 and (sender.personal_names or sender.personal_addresses or sender.personal_ruts or sender.personal_phones or sender.personal_plates):
         score += 0.05
     return min(score, 0.99)
