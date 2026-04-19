@@ -130,6 +130,9 @@ class SenderEvidence(BaseModel):
     reply_to_addresses: list[str] = []
     return_path_addresses: list[str] = []
     auth_domains: list[str] = []
+    header_ips: list[str] = []
+    header_ip_countries: list[str] = []
+    header_ip_chile_matches: list[str] = []
     subdomains: list[str] = []
 
 

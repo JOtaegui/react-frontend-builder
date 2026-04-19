@@ -64,6 +64,9 @@ interface EmailIdentificationResponse {
       from_addresses: string[];
       reply_to_addresses: string[];
       return_path_addresses: string[];
+      header_ips?: string[];
+      header_ip_countries?: string[];
+      header_ip_chile_matches?: string[];
     };
     risk: {
       level: "low" | "medium" | "high";
@@ -694,6 +697,9 @@ export default function EmailIdentificacion() {
                             </div>
                           </div>
                           <div className="flex shrink-0 flex-wrap gap-2">
+                            <Badge variant={sender.is_chilean ? "default" : "outline"} className={sender.is_chilean ? "bg-emerald-500 text-white hover:bg-emerald-500/90" : ""}>
+                              {sender.is_chilean ? "Empresa chilena" : "Empresa no chilena"}
+                            </Badge>
                             <Badge variant={riskVariant(sender.risk.level)}>{sender.risk.level}</Badge>
                             <Badge variant="secondary" className="bg-emerald-500 text-white hover:bg-emerald-500/90">conf. {confidenceLabel(sender.personal_data_confidence)}</Badge>
                             <Badge variant="outline">{sender.evidence?.message_count ?? 0} correos</Badge>
@@ -870,6 +876,24 @@ export default function EmailIdentificacion() {
                         {sender.risk.reasons.length > 0 && (
                           <div className="mt-4 rounded-xl border border-emerald-500/10 bg-background/80 px-4 py-3 text-sm text-muted-foreground">
                             {sender.risk.reasons[0]}
+                          </div>
+                        )}
+
+                        {((sender.evidence.header_ips ?? []).length > 0 || (sender.evidence.header_ip_chile_matches ?? []).length > 0) && (
+                          <div className="mt-4 rounded-2xl border border-emerald-500/12 bg-background/80 p-4">
+                            <div className="text-xs font-medium uppercase tracking-[0.16em] text-muted-foreground">IPs detectadas en cabeceras</div>
+                            <div className="mt-3 flex flex-wrap gap-2">
+                              {(sender.evidence.header_ips ?? []).slice(0, 8).map((ip) => (
+                                <Badge key={ip} variant="outline" className="border-emerald-500/25 font-mono text-xs">
+                                  {ip}
+                                </Badge>
+                              ))}
+                            </div>
+                            {(sender.evidence.header_ip_chile_matches ?? []).length > 0 && (
+                              <div className="mt-3 rounded-xl border border-emerald-500/20 bg-emerald-500/10 px-3 py-2 text-xs text-emerald-700 dark:text-emerald-300">
+                                Se detectaron IPs de cabecera asociadas a Chile.
+                              </div>
+                            )}
                           </div>
                         )}
 

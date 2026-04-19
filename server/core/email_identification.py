@@ -5,6 +5,7 @@ import base64
 import binascii
 import email.utils
 import json
+import logging
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -13,6 +14,7 @@ from typing import Any, Iterable, Optional
 
 import httpx
 from config import EMAIL_EXTRACTION_PROVIDER, GEMINI_API_KEY, GEMINI_MODEL
+from core.ip_classification import enrich_senders_with_header_ip_country, extract_header_ips
 from core.personal_data import (
     address_fingerprint,
     extract_chilean_address_matches,
@@ -160,6 +162,7 @@ PERSONAL_DATA_PATTERNS: list[tuple[str, tuple[str, ...]]] = [
     ("pago", ("pago", "factura", "boleta", "cargo", "cobro", "cuota", "vencimiento")),
     ("cuenta", ("cuenta", "suscripcion", "perfil", "clave", "contrasena", "password", "inicio de sesion")),
 ]
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -197,6 +200,9 @@ class SenderAggregate:
     auth_domains: set[str] = field(default_factory=set)
     reply_to_domains: set[str] = field(default_factory=set)
     return_path_domains: set[str] = field(default_factory=set)
+    header_ips: set[str] = field(default_factory=set)
+    header_ip_countries: set[str] = field(default_factory=set)
+    header_ip_chile_matches: set[str] = field(default_factory=set)
     subdomains: set[str] = field(default_factory=set)
     first_seen: Optional[str] = None
     last_seen: Optional[str] = None
@@ -263,6 +269,7 @@ async def identify_email_footprint(
             data_brokers.add(record.company_name)
 
     await _enrich_with_whois(aggregates)
+    await enrich_senders_with_header_ip_country(aggregates)
     await _enrich_with_llm_personal_data(aggregates)
 
     senders = [
@@ -563,7 +570,8 @@ def _gmail_internal_date_to_iso(value: Any) -> Optional[str]:
 
 
 def _parse_message(message: AuthorizedEmailMessage) -> dict[str, Any]:
-    headers = {item.name.lower(): item.value.strip() for item in message.headers}
+    headers_by_name = _group_headers_by_name(message.headers)
+    headers = {name: values[-1] for name, values in headers_by_name.items() if values}
     from_raw = headers.get("from", "")
     reply_to_raw = headers.get("reply-to", "")
     return_path_raw = headers.get("return-path", "")
@@ -580,6 +588,7 @@ def _parse_message(message: AuthorizedEmailMessage) -> dict[str, Any]:
     reply_to_domains = [domain for domain in (_normalize_domain(item) for item in raw_reply_to_domains) if domain]
     return_path_domains = [domain for domain in (_normalize_domain(item) for item in raw_return_path_domains) if domain]
     auth_domains = _extract_auth_domains(headers)
+    header_ips = extract_header_ips(headers_by_name)
     attachment_filenames = [name.strip() for name in (message.attachment_filenames or []) if name and name.strip()]
 
     primary_domain = next((domain for domain in from_domains if domain), None)
@@ -589,6 +598,20 @@ def _parse_message(message: AuthorizedEmailMessage) -> dict[str, Any]:
     content_lower = content.lower()
     all_domains = {domain for domain in from_domains + reply_to_domains + return_path_domains + auth_domains if domain}
     label_ids = [label.upper() for label in (message.label_ids or [])]
+
+    if header_ips:
+        logger.debug(
+            "[email-ip-debug-raw] message_id=%s | from_domain=%s | header_ips=%s",
+            message.provider_message_id or "desconocido",
+            primary_domain or "desconocido",
+            ", ".join(header_ips),
+        )
+    else:
+        logger.debug(
+            "[email-ip-debug-raw] message_id=%s | from_domain=%s | sin IP publica detectable",
+            message.provider_message_id or "desconocido",
+            primary_domain or "desconocido",
+        )
 
     address_matches = extract_chilean_address_matches(content)
     phone_matches = extract_chilean_phone_matches(content)
@@ -602,6 +625,7 @@ def _parse_message(message: AuthorizedEmailMessage) -> dict[str, Any]:
         "reply_to_domains": reply_to_domains,
         "return_path_domains": return_path_domains,
         "auth_domains": auth_domains,
+        "header_ips": header_ips,
         "attachment_filenames": attachment_filenames,
         "subject": subject,
         "content_excerpt": content[:4000],
@@ -647,6 +671,7 @@ def _merge_message(record: SenderAggregate, parsed: dict[str, Any]) -> None:
     record.reply_to_domains.update(parsed["reply_to_domains"])
     record.return_path_domains.update(parsed["return_path_domains"])
     record.auth_domains.update(parsed["auth_domains"])
+    record.header_ips.update(parsed["header_ips"])
     record.attachment_filenames.update(parsed["attachment_filenames"])
     record.subdomains.update(parsed["subdomains"])
     record.personal_data_types.update(parsed["personal_data_types"])
@@ -735,6 +760,14 @@ def _classify_sender(
     company_name = known["company_name"] if known else _guess_company_name(primary_domain)
     confidence = 0.95 if known else (0.8 if is_chilean else 0.65)
     tags: set[str] = set()
+    if known:
+        tags.add("known-sender")
+
+    if primary_domain.endswith(".cl"):
+        is_chilean = True
+        country = "Chile"
+        tags.add("tld-cl")
+        confidence = max(confidence, 0.9)
 
     if any(primary_domain.endswith(suffix) for suffix in CHILEAN_GOVERNMENT_SUFFIXES):
         sender_type = "gobierno"
@@ -844,6 +877,9 @@ def _to_identified_sender(sender: SenderAggregate) -> IdentifiedSender:
             reply_to_addresses=sorted(sender.reply_to_addresses),
             return_path_addresses=sorted(sender.return_path_addresses),
             auth_domains=sorted(sender.auth_domains),
+            header_ips=sorted(sender.header_ips),
+            header_ip_countries=sorted(sender.header_ip_countries),
+            header_ip_chile_matches=sorted(sender.header_ip_chile_matches),
             subdomains=sorted(sender.subdomains),
         ),
         risk=SenderRiskAssessment(
@@ -886,6 +922,17 @@ def _extract_auth_domains(headers: dict[str, str]) -> list[str]:
         if normalized:
             domains.add(normalized)
     return sorted(domains)
+
+
+def _group_headers_by_name(headers: Iterable[EmailHeaderKV]) -> dict[str, list[str]]:
+    grouped: dict[str, list[str]] = {}
+    for item in headers:
+        key = item.name.lower().strip()
+        value = item.value.strip()
+        if not key or not value:
+            continue
+        grouped.setdefault(key, []).append(value)
+    return grouped
 
 
 def _normalize_domain(domain: str) -> Optional[str]:
