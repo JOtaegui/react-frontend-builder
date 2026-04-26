@@ -110,12 +110,21 @@ class AuthorizedEmailMessage(BaseModel):
     headers: list[EmailHeaderKV] = []
 
 
+class EmailSearchTargets(BaseModel):
+    nombre: Optional[str] = None
+    rut: Optional[str] = None
+    direccion: Optional[str] = None
+    telefono: Optional[str] = None
+    patente: Optional[str] = None
+
+
 class EmailIdentificationRequest(BaseModel):
     provider: Literal["manual", "gmail"] = "manual"
     email_address: Optional[str] = None
     gmail_access_token: Optional[str] = None
     max_messages: int = 200
     messages: list[AuthorizedEmailMessage] = []
+    search_targets: Optional[EmailSearchTargets] = None
 
 
 class SenderEvidence(BaseModel):
@@ -133,7 +142,15 @@ class SenderEvidence(BaseModel):
     header_ips: list[str] = []
     header_ip_countries: list[str] = []
     header_ip_chile_matches: list[str] = []
+    header_ip_details: list["HeaderIpDetail"] = []
     subdomains: list[str] = []
+
+
+class HeaderIpDetail(BaseModel):
+    ip: str
+    country: Optional[str] = None
+    is_chilean: bool = False
+    criterion: Literal["rango-cl-lacnic", "rango-cl-csv", "rdap", "sin-datos"] = "sin-datos"
 
 
 class SenderRiskAssessment(BaseModel):
@@ -181,9 +198,17 @@ class IdentifiedSender(BaseModel):
     return_path_domains: list[str] = []
     auth_domains: list[str] = []
     tags: list[str] = []
+    matched_targets: list[str] = []
     whois: Optional[WhoisSummary] = None
     evidence: SenderEvidence
     risk: SenderRiskAssessment
+
+
+class BajaReportRequest(BaseModel):
+    holder_email: str
+    sender: IdentifiedSender
+    access_token: Optional[str] = None   # Gmail OAuth token → usa Gmail API en lugar de SMTP
+    sender_email: Optional[str] = None   # dirección Gmail del usuario autenticado
 
 
 class EmailIdentificationSummary(BaseModel):

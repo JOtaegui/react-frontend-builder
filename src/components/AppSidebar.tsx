@@ -1,6 +1,6 @@
 import { useParams, useLocation } from "react-router-dom";
 import {
-  Fingerprint, Home, BarChart3, FileSearch, ClipboardCheck, Search, MailSearch,
+  Fingerprint, Home, BarChart3, FileSearch, ClipboardCheck, Search, MailSearch, Network, Telescope,
 } from "lucide-react";
 import { NavLink } from "@/components/NavLink";
 import {
@@ -72,6 +72,24 @@ export function AppSidebar() {
                   <NavLink to="/identificacion-email" className="hover:bg-muted/50" activeClassName="bg-primary/10 text-primary font-medium">
                     <MailSearch className="mr-2 h-4 w-4" />
                     {!collapsed && <span>Identificación</span>}
+                  </NavLink>
+                </SidebarMenuButton>
+              </SidebarMenuItem>
+
+              <SidebarMenuItem>
+                <SidebarMenuButton asChild>
+                  <NavLink to="/cabeceras-empresa-temp" className="hover:bg-muted/50" activeClassName="bg-primary/10 text-primary font-medium">
+                    <Network className="mr-2 h-4 w-4" />
+                    {!collapsed && <span>Cabeceras (Temp)</span>}
+                  </NavLink>
+                </SidebarMenuButton>
+              </SidebarMenuItem>
+
+              <SidebarMenuItem>
+                <SidebarMenuButton asChild>
+                  <NavLink to="/exposicion-web-temp" className="hover:bg-muted/50" activeClassName="bg-primary/10 text-primary font-medium">
+                    <Telescope className="mr-2 h-4 w-4" />
+                    {!collapsed && <span>Exposición Web (Temp)</span>}
                   </NavLink>
                 </SidebarMenuButton>
               </SidebarMenuItem>

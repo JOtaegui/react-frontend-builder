@@ -7,6 +7,7 @@ import email.utils
 import json
 import logging
 import re
+import unicodedata
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from html import unescape
@@ -15,6 +16,7 @@ from typing import Any, Iterable, Optional
 import httpx
 from config import EMAIL_EXTRACTION_PROVIDER, GEMINI_API_KEY, GEMINI_MODEL
 from core.ip_classification import enrich_senders_with_header_ip_country, extract_header_ips
+from core.personal_data.cross_validator import extract_contact_info
 from core.personal_data import (
     address_fingerprint,
     extract_chilean_address_matches,
@@ -22,6 +24,7 @@ from core.personal_data import (
     extract_chilean_phone_matches,
     extract_chilean_ruts,
     extract_name_candidates,
+    find_address_near_target,
     select_primary_address,
     select_primary_name,
     select_primary_plate,
@@ -32,9 +35,11 @@ from core.personal_data import (
 from models.schemas import (
     AuthorizedEmailMessage,
     EmailHeaderKV,
+    HeaderIpDetail,
     EmailIdentificationRequest,
     EmailIdentificationResponse,
     EmailIdentificationSummary,
+    EmailSearchTargets,
     IdentifiedSender,
     SenderEvidence,
     SenderRiskAssessment,
@@ -162,6 +167,19 @@ PERSONAL_DATA_PATTERNS: list[tuple[str, tuple[str, ...]]] = [
     ("pago", ("pago", "factura", "boleta", "cargo", "cobro", "cuota", "vencimiento")),
     ("cuenta", ("cuenta", "suscripcion", "perfil", "clave", "contrasena", "password", "inicio de sesion")),
 ]
+MAX_PERSONAL_DATA_ANALYSIS_CHARS = 5000
+MAX_WHOIS_DOMAINS = 80
+MAX_LLM_SENDER_CANDIDATES = 8
+LLM_ENRICH_CONCURRENCY = 4
+_STYLE_SCRIPT_RE = re.compile(r"<(style|script)[^>]*>.*?</\1>", re.DOTALL | re.IGNORECASE)
+_COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
+_CONTACT_ADDRESS_HINT_RE = re.compile(
+    r"(?i)\b(direccion|domicilio|despacho|envio|entrega|calle|avenida|pasaje|camino|"
+    r"av\.?|depto|departamento|comuna|region)\b"
+)
+_CONTACT_PHONE_HINT_RE = re.compile(
+    r"(?i)(\+?56[\s().-]*(?:9|2)[\s().-]*\d{3,4}[\s().-]*\d{3,4}|\b(?:9|2)\d{8}\b|\b600[\s().-]*\d{3}[\s().-]*\d{4}\b)"
+)
 logger = logging.getLogger(__name__)
 
 
@@ -203,6 +221,7 @@ class SenderAggregate:
     header_ips: set[str] = field(default_factory=set)
     header_ip_countries: set[str] = field(default_factory=set)
     header_ip_chile_matches: set[str] = field(default_factory=set)
+    header_ip_details: dict[str, dict[str, Any]] = field(default_factory=dict)
     subdomains: set[str] = field(default_factory=set)
     first_seen: Optional[str] = None
     last_seen: Optional[str] = None
@@ -211,6 +230,7 @@ class SenderAggregate:
     suspected_data_broker: bool = False
     suspicious_infrastructure: bool = False
     aggressive_marketing: bool = False
+    matched_target_types: set[str] = field(default_factory=set)
     whois: Optional[WhoisSummary] = None
 
 
@@ -238,7 +258,7 @@ async def identify_email_footprint(
     trash_domains: set[str] = set()
 
     for message in messages[: request.max_messages]:
-        parsed = _parse_message(message)
+        parsed = _parse_message(message, request.search_targets)
         if not parsed["from_domain"]:
             continue
         if parsed["is_spam"]:
@@ -352,15 +372,25 @@ async def _fetch_gmail_messages(access_token: str, max_messages: int) -> list[Au
 
 
 async def _enrich_with_whois(aggregates: dict[str, SenderAggregate]) -> None:
+    if not aggregates:
+        return
+
     timeout = httpx.Timeout(8.0, connect=4.0)
+    prioritized_domains = [
+        domain
+        for domain, _ in sorted(
+            aggregates.items(),
+            key=lambda item: (-item[1].message_count, item[0]),
+        )
+    ][:MAX_WHOIS_DOMAINS]
+
     async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
-        domains = list(aggregates.keys())
         results = await asyncio.gather(
-            *[_fetch_whois_summary(client, domain) for domain in domains],
+            *[_fetch_whois_summary(client, domain) for domain in prioritized_domains],
             return_exceptions=True,
         )
 
-    for domain, result in zip(domains, results):
+    for domain, result in zip(prioritized_domains, results):
         if isinstance(result, Exception):
             continue
         aggregates[domain].whois = result
@@ -370,14 +400,24 @@ async def _enrich_with_llm_personal_data(aggregates: dict[str, SenderAggregate])
     if EMAIL_EXTRACTION_PROVIDER != "gemini" or not GEMINI_API_KEY:
         return
 
-    candidates = [item for item in aggregates.values() if item.sample_contents]
+    candidates = [
+        item
+        for item in sorted(aggregates.values(), key=lambda sender: (-sender.message_count, sender.company_name.lower()))
+        if item.sample_contents
+    ][:MAX_LLM_SENDER_CANDIDATES]
     if not candidates:
         return
 
-    timeout = httpx.Timeout(20.0, connect=8.0)
+    timeout = httpx.Timeout(8.0, connect=4.0)
     async with httpx.AsyncClient(timeout=timeout) as client:
+        semaphore = asyncio.Semaphore(LLM_ENRICH_CONCURRENCY)
+
+        async def run_one(sender: SenderAggregate) -> list[str]:
+            async with semaphore:
+                return await _extract_personal_data_with_gemini(client, sender)
+
         results = await asyncio.gather(
-            *[_extract_personal_data_with_gemini(client, sender) for sender in candidates],
+            *[run_one(sender) for sender in candidates],
             return_exceptions=True,
         )
 
@@ -569,7 +609,198 @@ def _gmail_internal_date_to_iso(value: Any) -> Optional[str]:
     return datetime.fromtimestamp(timestamp_ms / 1000, tz=timezone.utc).isoformat()
 
 
-def _parse_message(message: AuthorizedEmailMessage) -> dict[str, Any]:
+def _trim_content_for_personal_data(value: str, max_chars: int) -> str:
+    compact = re.sub(r"\s+", " ", value or "").strip()
+    if len(compact) <= max_chars:
+        return compact
+    if max_chars < 200:
+        return compact[:max_chars]
+    head = int(max_chars * 0.6)
+    tail = max_chars - head - 29
+    if tail < 0:
+        tail = 0
+    return f"{compact[:head]} [contenido truncado] {compact[-tail:]}" if tail else compact[:max_chars]
+
+
+def _should_run_cross_validator(content: str) -> bool:
+    if not content:
+        return False
+    has_address_hint = bool(_CONTACT_ADDRESS_HINT_RE.search(content))
+    has_phone_hint = bool(_CONTACT_PHONE_HINT_RE.search(content))
+    return has_address_hint and has_phone_hint
+
+
+def _normalize_free_text(value: str) -> str:
+    folded = unicodedata.normalize("NFKD", value or "")
+    ascii_folded = "".join(char for char in folded if not unicodedata.combining(char))
+    return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9]+", " ", ascii_folded.lower())).strip()
+
+
+def _normalize_phone_digits(value: str) -> str:
+    return re.sub(r"\D", "", value or "")
+
+
+def _extract_phone_variants(value: str) -> set[str]:
+    digits = _normalize_phone_digits(value)
+    if not digits:
+        return set()
+
+    variants: set[str] = set()
+
+    def push(candidate: str) -> None:
+        compact = candidate.strip()
+        if len(compact) >= 8 and compact.isdigit():
+            variants.add(compact)
+
+    queue = [digits]
+    visited: set[str] = set()
+    while queue:
+        candidate = queue.pop()
+        if candidate in visited:
+            continue
+        visited.add(candidate)
+        if candidate.startswith("0056"):
+            queue.append(candidate[4:])
+        if candidate.startswith("056"):
+            queue.append(candidate[3:])
+        if candidate.startswith("56"):
+            queue.append(candidate[2:])
+        if candidate.startswith("0"):
+            queue.append(candidate[1:])
+        push(candidate)
+        if len(candidate) >= 9:
+            push(candidate[-9:])
+        if len(candidate) >= 8:
+            push(candidate[-8:])
+
+    return variants
+
+
+def _normalize_phone(value: str) -> Optional[str]:
+    for candidate in sorted(_extract_phone_variants(value), key=lambda item: (abs(len(item) - 9), item)):
+        if len(candidate) == 9 and candidate[0] in {"9", "2"}:
+            return f"+56 {candidate[0]} {candidate[1:5]} {candidate[5:9]}"
+    return None
+
+
+def _compute_rut_dv(body: str) -> str:
+    factors = [2, 3, 4, 5, 6, 7]
+    total = 0
+    for index, digit in enumerate(reversed(body)):
+        total += int(digit) * factors[index % len(factors)]
+    remainder = 11 - (total % 11)
+    if remainder == 11:
+        return "0"
+    if remainder == 10:
+        return "K"
+    return str(remainder)
+
+
+def _format_rut(body: str, dv: str) -> str:
+    reversed_body = body[::-1]
+    groups = [reversed_body[i:i + 3][::-1] for i in range(0, len(reversed_body), 3)][::-1]
+    return f"{'.'.join(groups)}-{dv}"
+
+
+def _normalize_rut(value: str) -> Optional[str]:
+    compact = re.sub(r"[^0-9kK]", "", value or "").upper()
+    if len(compact) < 8 or len(compact) > 9:
+        return None
+    body, dv = compact[:-1], compact[-1]
+    if not body.isdigit() or _compute_rut_dv(body) != dv:
+        return None
+    return _format_rut(body, dv)
+
+
+def _normalize_plate(value: str) -> Optional[str]:
+    compact = re.sub(r"[^A-Za-z0-9]", "", value or "").upper()
+    if re.fullmatch(r"[A-Z]{4}\d{2}", compact):
+        return compact
+    if re.fullmatch(r"[A-Z]{2}\d{4}", compact):
+        return compact
+    return None
+
+
+def _contains_normalized(text: str, target: str) -> bool:
+    text_norm = _normalize_free_text(text)
+    target_norm = _normalize_free_text(target)
+    return bool(text_norm and target_norm and target_norm in text_norm)
+
+
+def _contains_phone_digits(text: str, target: str) -> bool:
+    text_digits = _normalize_phone_digits(text)
+    if not text_digits:
+        return False
+    for variant in _extract_phone_variants(target):
+        if variant in text_digits:
+            return True
+    return False
+
+
+def _contains_plate(text: str, target: str) -> bool:
+    target_plate = _normalize_plate(target)
+    if not target_plate:
+        return False
+    compact_text = re.sub(r"[^A-Za-z0-9]", "", text or "").upper()
+    return target_plate in compact_text
+
+
+def _names_related(value: str, target: str) -> bool:
+    value_tokens = [token for token in _normalize_free_text(value).split(" ") if token]
+    target_tokens = [token for token in _normalize_free_text(target).split(" ") if token]
+    if not value_tokens or not target_tokens:
+        return False
+    shared = set(value_tokens) & set(target_tokens)
+    min_required = max(1, min(2, min(len(value_tokens), len(target_tokens))))
+    return len(shared) >= min_required
+
+
+def _address_related(value: str, target: str) -> bool:
+    value_fp = address_fingerprint(value)
+    target_fp = address_fingerprint(target)
+    if value_fp and target_fp and value_fp == target_fp:
+        return True
+
+    value_norm = _normalize_free_text(value)
+    target_norm = _normalize_free_text(target)
+    if not value_norm or not target_norm:
+        return False
+    if value_norm in target_norm or target_norm in value_norm:
+        return True
+
+    value_tokens = {token for token in value_norm.split(" ") if len(token) >= 3}
+    target_tokens = {token for token in target_norm.split(" ") if len(token) >= 3}
+    shared_tokens = value_tokens & target_tokens
+    if len(shared_tokens) >= 2:
+        value_number = re.search(r"\b\d{1,5}\b", value_norm)
+        target_number = re.search(r"\b\d{1,5}\b", target_norm)
+        if value_number and target_number:
+            return value_number.group(0) == target_number.group(0)
+        return True
+    return False
+
+
+def _phone_related(value: str, target: str) -> bool:
+    value_variants = _extract_phone_variants(value)
+    target_variants = _extract_phone_variants(target)
+    if not value_variants or not target_variants:
+        return False
+    return bool(value_variants & target_variants)
+
+
+def _rut_related(value: str, target: str) -> bool:
+    value_norm = _normalize_rut(value)
+    target_norm = _normalize_rut(target)
+    return bool(value_norm and target_norm and value_norm == target_norm)
+
+
+def _plate_related(value: str, target: str) -> bool:
+    value_norm = _normalize_plate(value)
+    target_norm = _normalize_plate(target)
+    return bool(value_norm and target_norm and value_norm == target_norm)
+
+
+def _parse_message(message: AuthorizedEmailMessage, search_targets: Optional[EmailSearchTargets] = None) -> dict[str, Any]:
     headers_by_name = _group_headers_by_name(message.headers)
     headers = {name: values[-1] for name, values in headers_by_name.items() if values}
     from_raw = headers.get("from", "")
@@ -595,7 +826,8 @@ def _parse_message(message: AuthorizedEmailMessage) -> dict[str, Any]:
     subject = (message.subject or headers.get("subject") or "").strip()
     attachment_text = " ".join(f"Adjunto {filename}" for filename in attachment_filenames)
     content = " ".join(filter(None, [subject, message.snippet, message.body_text, _strip_html(message.body_html or ""), attachment_text]))
-    content_lower = content.lower()
+    analysis_content = _trim_content_for_personal_data(content, max_chars=MAX_PERSONAL_DATA_ANALYSIS_CHARS)
+    content_lower = analysis_content.lower()
     all_domains = {domain for domain in from_domains + reply_to_domains + return_path_domains + auth_domains if domain}
     label_ids = [label.upper() for label in (message.label_ids or [])]
 
@@ -613,9 +845,184 @@ def _parse_message(message: AuthorizedEmailMessage) -> dict[str, Any]:
             primary_domain or "desconocido",
         )
 
-    address_matches = extract_chilean_address_matches(content)
-    phone_matches = extract_chilean_phone_matches(content)
-    plate_matches = extract_chilean_plate_matches(content)
+    name_candidates = extract_name_candidates(analysis_content)
+    contact_info = None
+    should_run_cross_validator = _should_run_cross_validator(analysis_content)
+    if should_run_cross_validator:
+        try:
+            contact_info = extract_contact_info(analysis_content, name_hints=name_candidates, min_confidence=0.35)
+            logger.debug(
+                "[cross-validator] message_id=%s | address=%s | phone=%s | confidence=%.2f",
+                message.provider_message_id or "desconocido",
+                (contact_info.address if contact_info and contact_info.address else "none"),
+                (contact_info.phone if contact_info and contact_info.phone else "none"),
+                (contact_info.confidence if contact_info else 0.0),
+            )
+        except Exception as exc:
+            logger.debug("[cross-validator] fallo en message_id=%s: %s", message.provider_message_id or "desconocido", exc)
+    else:
+        logger.debug(
+            "[cross-validator] message_id=%s | omitido por falta de señales combinadas (direccion+telefono)",
+            message.provider_message_id or "desconocido",
+        )
+
+    address_matches = extract_chilean_address_matches(analysis_content)
+    phone_matches = extract_chilean_phone_matches(analysis_content)
+    plate_matches = extract_chilean_plate_matches(analysis_content)
+    personal_data_types = _detect_personal_data_types(content_lower)
+    personal_addresses = [match.address for match in address_matches]
+    personal_address_scores = {match.address: match.score for match in address_matches}
+    personal_address_evidence = [match.evidence for match in address_matches]
+    personal_phones = [match.phone for match in phone_matches]
+    personal_phone_evidence = [match.evidence for match in phone_matches]
+    personal_ruts = extract_chilean_ruts(analysis_content)
+    personal_plates = [match.plate for match in plate_matches]
+    personal_plate_evidence = [match.evidence for match in plate_matches]
+
+    if contact_info:
+        if contact_info.address and contact_info.address not in personal_addresses:
+            personal_addresses.insert(0, contact_info.address)
+            personal_address_scores[contact_info.address] = max(personal_address_scores.get(contact_info.address, 0), 5)
+        if contact_info.phone and contact_info.phone not in personal_phones:
+            personal_phones.insert(0, contact_info.phone)
+
+        details = contact_info.details if isinstance(contact_info.details, dict) else {}
+        cv_address_candidates = details.get("address_candidates", []) if isinstance(details, dict) else []
+        cv_phone_candidates = details.get("phone_candidates", []) if isinstance(details, dict) else []
+        should_merge_cv_address_candidates = bool(contact_info.address and contact_info.confidence >= 0.35)
+
+        if contact_info.address:
+            summary = f"[cross-validator] Direccion validada con confianza {contact_info.confidence:.2f}"
+            if summary not in personal_address_evidence:
+                personal_address_evidence.insert(0, summary)
+        if contact_info.phone:
+            summary = f"[cross-validator] Telefono validado con confianza {contact_info.confidence:.2f}"
+            if summary not in personal_phone_evidence:
+                personal_phone_evidence.insert(0, summary)
+
+        for candidate in cv_address_candidates:
+            if not should_merge_cv_address_candidates:
+                break
+            if not isinstance(candidate, dict):
+                continue
+            addr = str(candidate.get("address") or "").strip()
+            if not addr:
+                continue
+            if not _is_structured_address_candidate(addr):
+                continue
+            score = candidate.get("score")
+            if not isinstance(score, (int, float)) or int(score) < 8:
+                continue
+            if addr not in personal_addresses:
+                personal_addresses.append(addr)
+            personal_address_scores[addr] = max(int(score), personal_address_scores.get(addr, 0))
+            evidence = str(candidate.get("evidence") or "").strip()
+            if evidence and evidence not in personal_address_evidence and len(personal_address_evidence) < 8:
+                personal_address_evidence.append(evidence)
+
+        for candidate in cv_phone_candidates:
+            if not isinstance(candidate, dict):
+                continue
+            phone = str(candidate.get("phone") or "").strip()
+            if phone and phone not in personal_phones:
+                personal_phones.append(phone)
+            evidence = str(candidate.get("evidence") or "").strip()
+            if evidence and evidence not in personal_phone_evidence and len(personal_phone_evidence) < 8:
+                personal_phone_evidence.append(evidence)
+
+    # ── Objetivos opcionales para búsqueda de mayor precisión ────────────────
+    matched_target_types: set[str] = set()
+
+    if search_targets is not None:
+        target_nombre    = (search_targets.nombre    or "").strip()
+        target_rut       = (search_targets.rut       or "").strip()
+        target_direccion = (search_targets.direccion or "").strip()
+        target_telefono  = (search_targets.telefono  or "").strip()
+        target_patente   = (search_targets.patente   or "").strip()
+
+        # ── Nombre ────────────────────────────────────────────────────────────
+        if target_nombre:
+            matched_names = [v for v in name_candidates if _names_related(v, target_nombre)]
+            # Buscar también en contenido completo (no truncado)
+            if matched_names or _contains_normalized(content, target_nombre):
+                name_candidates = _dedupe_preserve_order([target_nombre, *matched_names, *name_candidates])
+                if "nombre" not in personal_data_types:
+                    personal_data_types.append("nombre")
+                matched_target_types.add("nombre")
+
+        # ── Dirección ─────────────────────────────────────────────────────────
+        if target_direccion:
+            # 1) Buscar en direcciones ya extraídas (match flexible)
+            matched_addresses = [v for v in personal_addresses if _address_related(v, target_direccion)]
+
+            # 2) Si no hay match, buscar en el contenido COMPLETO (no truncado)
+            if not matched_addresses and _contains_normalized(content, target_direccion):
+                recovered = find_address_near_target(content, target_direccion)
+                if recovered:
+                    matched_addresses = [recovered]
+
+            # 3) Si la dirección completa no aparece, buscar solo la calle
+            #    para al menos confirmar que el remitente conoce esa calle
+            found_street_only = not matched_addresses and _contains_normalized(content, target_direccion)
+
+            if matched_addresses or found_street_only:
+                best_target = matched_addresses[0] if matched_addresses else target_direccion
+                personal_addresses = _dedupe_preserve_order([best_target, *matched_addresses, *personal_addresses])
+                personal_address_scores[best_target] = max(personal_address_scores.get(best_target, 0), 12)
+                ev_msg = (
+                    "[target] Direccion objetivo encontrada en el correo"
+                    if matched_addresses else
+                    "[target] Calle del objetivo mencionada en el correo"
+                )
+                if ev_msg not in personal_address_evidence:
+                    personal_address_evidence.insert(0, ev_msg)
+                if "direccion" not in personal_data_types:
+                    personal_data_types.append("direccion")
+                matched_target_types.add("direccion")
+
+        # ── RUT ───────────────────────────────────────────────────────────────
+        if target_rut:
+            matched_ruts = [v for v in personal_ruts if _rut_related(v, target_rut)]
+            target_rut_norm = _normalize_rut(target_rut)
+            # Buscar en contenido completo también
+            rut_in_full = extract_chilean_ruts(content)
+            content_has_rut = any(_rut_related(v, target_rut) for v in rut_in_full)
+            if matched_ruts or content_has_rut:
+                rut_to_add = target_rut_norm or target_rut
+                personal_ruts = _dedupe_preserve_order([rut_to_add, *matched_ruts, *personal_ruts])
+                if "rut" not in personal_data_types:
+                    personal_data_types.append("rut")
+                matched_target_types.add("rut")
+
+        # ── Teléfono ──────────────────────────────────────────────────────────
+        if target_telefono:
+            matched_phones = [v for v in personal_phones if _phone_related(v, target_telefono)]
+            # Buscar en contenido completo
+            has_phone_in_full = _contains_phone_digits(content, target_telefono)
+            if matched_phones or has_phone_in_full:
+                phone_to_add = _normalize_phone(target_telefono) or target_telefono
+                personal_phones = _dedupe_preserve_order([phone_to_add, *matched_phones, *personal_phones])
+                ev_phone = "[target] Telefono objetivo encontrado en el correo"
+                if ev_phone not in personal_phone_evidence:
+                    personal_phone_evidence.insert(0, ev_phone)
+                if "telefono" not in personal_data_types:
+                    personal_data_types.append("telefono")
+                matched_target_types.add("telefono")
+
+        # ── Patente ───────────────────────────────────────────────────────────
+        if target_patente:
+            matched_plates = [v for v in personal_plates if _plate_related(v, target_patente)]
+            target_plate_norm = _normalize_plate(target_patente)
+            has_plate_in_full = _contains_plate(content, target_patente)
+            if matched_plates or has_plate_in_full:
+                plate_to_add = target_plate_norm or target_patente
+                personal_plates = _dedupe_preserve_order([plate_to_add, *matched_plates, *personal_plates])
+                ev_plate = "[target] Patente objetivo encontrada en el correo"
+                if ev_plate not in personal_plate_evidence:
+                    personal_plate_evidence.insert(0, ev_plate)
+                if "patente" not in personal_data_types:
+                    personal_data_types.append("patente")
+                matched_target_types.add("patente")
 
     return {
         "from_addresses": from_addresses,
@@ -639,19 +1046,20 @@ def _parse_message(message: AuthorizedEmailMessage) -> dict[str, Any]:
             if subdomain
         },
         "all_domains": all_domains,
-        "personal_data_types": _detect_personal_data_types(content_lower),
-        "personal_names": extract_name_candidates(content),
-        "personal_addresses": [match.address for match in address_matches],
-        "personal_address_fingerprints": {match.address: address_fingerprint(match.address) for match in address_matches},
-        "personal_address_scores": {match.address: match.score for match in address_matches},
-        "personal_address_evidence": [match.evidence for match in address_matches],
-        "personal_ruts": extract_chilean_ruts(content),
-        "personal_phones": [match.phone for match in phone_matches],
-        "personal_phone_evidence": [match.evidence for match in phone_matches],
-        "personal_plates": [match.plate for match in plate_matches],
-        "personal_plate_evidence": [match.evidence for match in plate_matches],
+        "personal_data_types": personal_data_types,
+        "personal_names": name_candidates,
+        "personal_addresses": personal_addresses,
+        "personal_address_fingerprints": {address: address_fingerprint(address) for address in personal_addresses},
+        "personal_address_scores": personal_address_scores,
+        "personal_address_evidence": personal_address_evidence,
+        "personal_ruts": personal_ruts,
+        "personal_phones": personal_phones,
+        "personal_phone_evidence": personal_phone_evidence,
+        "personal_plates": personal_plates,
+        "personal_plate_evidence": personal_plate_evidence,
         "newsletter": any(hint in content_lower for hint in NEWSLETTER_HINTS),
         "marketing": any(word in content_lower for word in ("descuento", "oferta", "promo", "sale", "cyber", "black friday")),
+        "matched_target_types": matched_target_types,
     }
 
 
@@ -726,6 +1134,8 @@ def _merge_message(record: SenderAggregate, parsed: dict[str, Any]) -> None:
         record.aggressive_marketing = True
         record.risk_reasons.add("Contenido promocional recurrente")
         record.tags.add("marketing")
+
+    record.matched_target_types.update(parsed.get("matched_target_types", set()))
 
     mismatched_domains = {
         domain for domain in parsed["reply_to_domains"] + parsed["return_path_domains"] + parsed["auth_domains"]
@@ -864,6 +1274,7 @@ def _to_identified_sender(sender: SenderAggregate) -> IdentifiedSender:
         return_path_domains=sorted(sender.return_path_domains),
         auth_domains=sorted(sender.auth_domains),
         tags=sorted(sender.tags),
+        matched_targets=sorted(sender.matched_target_types),
         whois=sender.whois,
         evidence=SenderEvidence(
             message_count=sender.message_count,
@@ -880,6 +1291,16 @@ def _to_identified_sender(sender: SenderAggregate) -> IdentifiedSender:
             header_ips=sorted(sender.header_ips),
             header_ip_countries=sorted(sender.header_ip_countries),
             header_ip_chile_matches=sorted(sender.header_ip_chile_matches),
+            header_ip_details=[
+                HeaderIpDetail(
+                    ip=item["ip"],
+                    country=item.get("country"),
+                    is_chilean=bool(item.get("is_chilean")),
+                    criterion=item.get("criterion", "sin-datos"),
+                )
+                for item in sorted(sender.header_ip_details.values(), key=lambda detail: detail.get("ip", ""))
+                if item.get("ip")
+            ],
             subdomains=sorted(sender.subdomains),
         ),
         risk=SenderRiskAssessment(
@@ -1006,7 +1427,9 @@ def _is_probably_chilean(domain: str) -> bool:
 def _strip_html(value: str) -> str:
     if not value:
         return ""
-    no_tags = re.sub(r"<[^>]+>", " ", value)
+    cleaned = _STYLE_SCRIPT_RE.sub(" ", value)
+    cleaned = _COMMENT_RE.sub(" ", cleaned)
+    no_tags = re.sub(r"<[^>]+>", " ", cleaned)
     return re.sub(r"\s+", " ", unescape(no_tags)).strip()
 
 
@@ -1059,6 +1482,17 @@ def _dedupe_preserve_order(values: Iterable[str]) -> list[str]:
         seen.add(value)
         result.append(value)
     return result
+
+
+def _is_structured_address_candidate(value: str) -> bool:
+    normalized = value.lower()
+    if not re.search(r"(?<!\d)\d{1,5}(?!\d)", normalized):
+        return False
+    if len(value.split()) < 2:
+        return False
+    if re.search(r"\b(hasta|aprovecha|oferta|descuento|dcto|cuotas?|black|friday|cyber|promo)\b", normalized):
+        return False
+    return True
 
 
 def _choose_better_address_display(current: Optional[str], candidate: str) -> str:

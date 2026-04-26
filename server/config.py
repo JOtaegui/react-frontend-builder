@@ -1,12 +1,25 @@
 """
 Config — todas las constantes y variables de entorno en un solo lugar.
 Usa un archivo .env local para sobreescribir valores en desarrollo.
+En modo standalone (PyInstaller) carga ~/.emailanalyzer/.env via DOTENV_PATH.
 """
 from __future__ import annotations
 import os
 from dotenv import load_dotenv
 
-load_dotenv()
+# 1. Credenciales base: server/.env del repo (en desarrollo) o REPO_DOTENV_PATH (en bundle)
+_repo_env = os.getenv("REPO_DOTENV_PATH") or os.path.join(os.path.dirname(__file__), ".env")
+if os.path.exists(_repo_env):
+    load_dotenv(_repo_env)
+
+# 2. Override personal del usuario — ~/.emailanalyzer/.env (SMTP, destino baja, etc.)
+# Solo aplica valores no vacíos para no pisar las credenciales OAuth del repo.
+_user_env = os.getenv("DOTENV_PATH")
+if _user_env and os.path.exists(_user_env):
+    from dotenv import dotenv_values as _dotenv_values
+    for _k, _v in _dotenv_values(_user_env).items():
+        if _v:  # ignorar claves con valor vacío
+            os.environ[_k] = _v
 
 # ── General ──────────────────────────────────────────────────────────────────
 APP_NAME    = "OSINT Chile Backend"
@@ -18,7 +31,12 @@ CORS_ORIGINS: list[str] = [
     "http://localhost:5173",   # Vite dev
     "http://localhost:3000",
     "http://localhost:8080",
+    "http://localhost:8787",   # Standalone app
 ]
+
+# ── Rutas de datos (sobreescribibles por el launcher standalone) ─────────────
+STATIC_DIST_PATH: str = os.getenv("STATIC_DIST_PATH", "")
+DB_PATH_OVERRIDE:  str = os.getenv("DB_PATH", "")
 
 # ── Timeouts por módulo (segundos) ──────────────────────────────────────────
 # Cada módulo usa su propio timeout para no bloquear a los demás.
@@ -48,7 +66,10 @@ HIBP_API_KEY = os.getenv("HIBP_API_KEY", "")   # requerida para HIBP
 HIBP_API_URL = "https://haveibeenpwned.com/api/v3"
 BRAVE_SEARCH_API_KEY = os.getenv("BRAVE_SEARCH_API_KEY", "")
 BRAVE_SEARCH_API_URL = "https://api.search.brave.com/res/v1/web/search"
-FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:5173")
+# En modo standalone (STATIC_DIST_PATH set por el launcher) el frontend
+# es el mismo servidor en puerto 8787, no el dev server de Vite.
+_standalone = bool(os.getenv("STATIC_DIST_PATH") or os.getenv("DB_PATH"))
+FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:8787" if _standalone else "http://localhost:5173")
 GOOGLE_OAUTH_CLIENT_ID = os.getenv("GOOGLE_OAUTH_CLIENT_ID", "")
 GOOGLE_OAUTH_CLIENT_SECRET = os.getenv("GOOGLE_OAUTH_CLIENT_SECRET", "")
 GOOGLE_OAUTH_REDIRECT_URI = os.getenv(
@@ -62,7 +83,17 @@ GOOGLE_OAUTH_SCOPES = [
     "openid",
     "email",
     "https://www.googleapis.com/auth/gmail.readonly",
+    "https://www.googleapis.com/auth/gmail.send",
 ]
+
+# ── SMTP (para envío de informes de baja) ────────────────────────────────────
+SMTP_HOST               = os.getenv("SMTP_HOST", "smtp.gmail.com")
+SMTP_PORT               = int(os.getenv("SMTP_PORT", "465"))
+SMTP_USER               = os.getenv("SMTP_USER", "")       # tu cuenta Gmail que envía
+SMTP_PASSWORD           = os.getenv("SMTP_PASSWORD", "")   # app password de Gmail
+SMTP_FROM               = os.getenv("SMTP_FROM", SMTP_USER)
+SMTP_USE_SSL            = os.getenv("SMTP_USE_SSL", "true").lower() == "true"
+BAJA_REPORT_DESTINATION = os.getenv("BAJA_REPORT_DESTINATION", "juanotaegui61@gmail.com")
 
 # ── Fuentes chilenas ─────────────────────────────────────────────────────────
 NRYF_BASE_URL    = "https://www.nombrerutyfirma.com"

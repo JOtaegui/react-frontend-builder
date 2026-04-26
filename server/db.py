@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -28,7 +29,9 @@ from models.schemas import OSINTResponse
 
 logger = logging.getLogger(__name__)
 
-DB_PATH = Path(__file__).parent / "osint_chile.db"
+# DB_PATH can be overridden by the launcher (standalone app stores DB in ~/.emailanalyzer/)
+_db_path_env = os.environ.get("DB_PATH", "")
+DB_PATH = Path(_db_path_env) if _db_path_env else Path(__file__).parent / "osint_chile.db"
 
 
 # ── Inicialización ────────────────────────────────────────────────────────────

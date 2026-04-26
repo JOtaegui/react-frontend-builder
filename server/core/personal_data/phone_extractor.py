@@ -23,7 +23,7 @@ Cambios principales respecto a la versión anterior
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import re
 
 # ---------------------------------------------------------------------------
@@ -175,6 +175,7 @@ _LABEL_PREFIX_RE = re.compile(
 class PhoneMatch:
     phone: str
     evidence: str
+    score: int = field(default=0, compare=False)
 
 
 # ---------------------------------------------------------------------------
@@ -188,9 +189,25 @@ def extract_chilean_phones(content: str) -> list[str]:
 
 def extract_chilean_phone_matches(content: str) -> list[PhoneMatch]:
     """Devuelve hasta 5 PhoneMatch ordenados por prioridad."""
+    return extract_chilean_phone_matches_with_context(content)
+
+
+def extract_chilean_phone_matches_with_context(
+    content: str,
+    nearby_addresses: list[str] | None = None,
+    nearby_names: list[str] | None = None,
+    boost_if_near_address: int = 3,
+    boost_if_near_name: int = 2,
+) -> list[PhoneMatch]:
+    """
+    Variante compatible con cross_validator.
+    Si se entregan direcciones/nombres cercanos, aumenta score por co-ocurrencia.
+    """
     if not content:
         return []
 
+    nearby_addresses = nearby_addresses or []
+    nearby_names = nearby_names or []
     found: list[PhoneMatch] = []
     seen: set[str] = set()
 
@@ -211,14 +228,15 @@ def extract_chilean_phone_matches(content: str) -> list[PhoneMatch]:
         line = _enclosing_line(content, start, end)
 
         score = _score_phone(raw, normalized, line, window, prefix)
+        score += _cross_validate(window, nearby_addresses, nearby_names, boost_if_near_address, boost_if_near_name)
         if score < _min_score(normalized):
             continue
 
         seen.add(normalized)
-        found.append(PhoneMatch(phone=normalized, evidence=_compact_snippet(window)))
+        found.append(PhoneMatch(phone=normalized, evidence=_compact_snippet(window), score=score))
 
-    # Ordenar: primero los de mayor score implícito (móviles primero, luego fijos)
-    found.sort(key=lambda m: _phone_priority(m.phone))
+    # Ordenar por score descendente y luego por prioridad de formato.
+    found.sort(key=lambda m: (-m.score, _phone_priority(m.phone), m.phone))
     return found[:5]
 
 
@@ -326,6 +344,31 @@ def _score_phone(raw: str, normalized: str, line: str, window: str, prefix: str)
             break
 
     return score
+
+
+def _cross_validate(
+    window: str,
+    nearby_addresses: list[str],
+    nearby_names: list[str],
+    boost_address: int,
+    boost_name: int,
+) -> int:
+    bonus = 0
+    nw = _nt(window)
+
+    for address in nearby_addresses:
+        tokens = [t for t in re.findall(r"[a-záéíóúüñ]{4,}", _nt(address)) if t not in {"calle", "avenida", "pasaje", "camino"}]
+        if any(token in nw for token in tokens[:4]):
+            bonus += boost_address
+            break
+
+    for name in nearby_names:
+        parts = [part for part in _nt(name).split() if len(part) >= 4]
+        if any(part in nw for part in parts):
+            bonus += boost_name
+            break
+
+    return bonus
 
 
 def _min_score(normalized: str) -> int:

@@ -7,10 +7,18 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
-import { Building2, Link2, Loader2, Mail, ShieldAlert, Unlink2, UserRound } from "lucide-react";
+import { Building2, Link2, Loader2, Mail, ShieldAlert, Telescope, Unlink2, UserRound } from "lucide-react";
+import { useNavigate } from "react-router-dom";
 
 type ProviderMode = "manual" | "gmail";
 type SummarySignalType = "name" | "address" | "rut" | "phone" | "plate";
+type SearchTargets = {
+  nombre: string;
+  rut: string;
+  direccion: string;
+  telefono: string;
+  patente: string;
+};
 
 interface EmailIdentificationResponse {
   provider: string;
@@ -52,6 +60,7 @@ interface EmailIdentificationResponse {
     primary_personal_plate?: string | null;
     personal_plate_evidence: string[];
     tags: string[];
+    matched_targets?: string[];
     whois?: {
       registrar?: string | null;
     } | null;
@@ -142,6 +151,29 @@ function uniqueNames(senders: EmailSender[]) {
   return senders
     .flatMap((sender) => sender.personal_names ?? [])
     .filter((value, index, array) => array.indexOf(value) === index);
+}
+
+function looksLikeEmail(value?: string | null) {
+  if (!value) return false;
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value.trim());
+}
+
+function chooseWebSearchEmail(senders: EmailSender[], preferred?: string | null) {
+  if (looksLikeEmail(preferred)) return preferred!.trim().toLowerCase();
+
+  const candidates = senders.flatMap((sender) => [
+    ...(sender.evidence?.from_addresses ?? []),
+    ...(sender.evidence?.reply_to_addresses ?? []),
+    ...(sender.evidence?.return_path_addresses ?? []),
+  ]);
+
+  const normalized = candidates
+    .map((item) => item.trim().toLowerCase())
+    .filter((item, index, array) => array.indexOf(item) === index)
+    .filter((item) => looksLikeEmail(item))
+    .filter((item) => !/(^noreply@|^no-reply@|^reply-|^bounce@|mailer|notification)/.test(item));
+
+  return normalized[0] ?? "";
 }
 
 function normalizeName(value: string) {
@@ -263,6 +295,66 @@ function confidenceLabel(value: number) {
   return "Baja";
 }
 
+function summarizeList(values: Array<string | null | undefined>, fallback: string, limit = 8) {
+  const cleaned = values
+    .map((value) => (value ?? "").trim())
+    .filter(Boolean)
+    .filter((value, index, array) => array.indexOf(value) === index);
+  if (cleaned.length === 0) return fallback;
+  return cleaned.slice(0, limit).join(", ");
+}
+
+function buildDataRightsDraft(sender: EmailSender, holderEmail: string) {
+  const headerIps = sender.evidence?.header_ips ?? [];
+  const chileIps = sender.evidence?.header_ip_chile_matches ?? [];
+  const fromAddresses = sender.evidence?.from_addresses ?? [];
+  const replyToAddresses = sender.evidence?.reply_to_addresses ?? [];
+  const returnPathAddresses = sender.evidence?.return_path_addresses ?? [];
+  const sampleSubjects = sender.evidence?.sample_subjects ?? [];
+  const attachmentFilenames = sender.evidence?.attachment_filenames ?? [];
+  const personalDataTypes = (sender.personal_data_types ?? []).map((item) => personalDataLabel(item));
+
+  return [
+    `Estimado equipo de privacidad de ${sender.company_name},`,
+    "",
+    "Solicito el ejercicio de mis derechos sobre datos personales (acceso, oposicion y supresion/eliminacion).",
+    "Este correo se envia en modo prueba a mi propia casilla para validar el formato antes de enviarlo a la empresa.",
+    "",
+    `Titular: ${holderEmail}`,
+    `Empresa analizada: ${sender.company_name} (${sender.primary_domain})`,
+    "",
+    "1) Informacion personal detectada en sus correos:",
+    `- Tipos de datos: ${summarizeList(personalDataTypes, "Sin datos personales tipificados")}`,
+    `- Nombre(s): ${summarizeList(sender.personal_names ?? [], "No detectado")}`,
+    `- Direccion(es): ${summarizeList(sender.personal_addresses ?? [], "No detectado")}`,
+    `- RUT(s): ${summarizeList(sender.personal_ruts ?? [], "No detectado")}`,
+    `- Telefono(s): ${summarizeList(sender.personal_phones ?? [], "No detectado")}`,
+    `- Patente(s): ${summarizeList(sender.personal_plates ?? [], "No detectado")}`,
+    "",
+    "2) Evidencia del tratamiento y envio de correos:",
+    `- Cantidad de correos detectados de esta empresa: ${sender.evidence?.message_count ?? 0}`,
+    `- Correos clasificados como spam: ${sender.evidence?.spam_count ?? 0}`,
+    `- Correos clasificados como papelera: ${sender.evidence?.trash_count ?? 0}`,
+    `- Remitentes (From): ${summarizeList(fromAddresses, "No informado")}`,
+    `- Reply-To: ${summarizeList(replyToAddresses, "No informado")}`,
+    `- Return-Path: ${summarizeList(returnPathAddresses, "No informado")}`,
+    `- IPs de cabecera detectadas (${headerIps.length}): ${summarizeList(headerIps, "No detectadas", 12)}`,
+    `- IPs de cabecera asociadas a Chile (${chileIps.length}): ${summarizeList(chileIps, "No detectadas", 12)}`,
+    `- Asuntos de muestra: ${summarizeList(sampleSubjects, "No informado", 6)}`,
+    `- Adjuntos observados: ${summarizeList(attachmentFilenames, "No informado", 6)}`,
+    "",
+    "3) Solicitud:",
+    "- Confirmar si mantienen mis datos personales y detallar su origen, finalidad, base legal y destinatarios.",
+    "- Eliminar/suprimir mis datos personales de sus sistemas y detener futuros envios.",
+    "- Entregar evidencia de cumplimiento de la eliminacion (fecha, sistemas impactados y terceros notificados).",
+    "",
+    "En caso de rechazo total o parcial, solicito su fundamento legal y el canal formal para reclamar.",
+    "",
+    "Saludos,",
+    holderEmail,
+  ].join("\n");
+}
+
 function availableSummarySignal(summarySignals: {
   name: { value: string | null; count: number };
   address: { value: string | null; count: number };
@@ -278,6 +370,7 @@ function availableSummarySignal(summarySignals: {
 }
 
 export default function EmailIdentificacion() {
+  const navigate = useNavigate();
   const [provider, setProvider] = useState<ProviderMode>("gmail");
   const [emailAddress, setEmailAddress] = useState("");
   const [gmailAuth, setGmailAuth] = useState<GmailOAuthPayload | null>(null);
@@ -285,11 +378,23 @@ export default function EmailIdentificacion() {
   const [gmailCallbackOrigin, setGmailCallbackOrigin] = useState<string | null>(null);
   const [oauthLoading, setOauthLoading] = useState(false);
   const [maxMessages, setMaxMessages] = useState("150");
+  const [searchTargets, setSearchTargets] = useState<SearchTargets>({
+    nombre: "",
+    rut: "",
+    direccion: "",
+    telefono: "",
+    patente: "",
+  });
   const [messagesJson, setMessagesJson] = useState(sampleMessages);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<EmailIdentificationResponse | null>(null);
   const [selectedSummarySignal, setSelectedSummarySignal] = useState<SummarySignalType>("name");
+  const [draftError, setDraftError] = useState<string | null>(null);
+  const [draftSuccess, setDraftSuccess] = useState<string | null>(null);
+  const [sendingBaja, setSendingBaja] = useState<string | null>(null);
+  const [bajaDestination, setBajaDestination] = useState<string | null>(null);
+  const [bajaSmtpOk, setBajaSmtpOk] = useState<boolean | null>(null);
 
   const payloadPreview = useMemo(() => {
     try {
@@ -299,6 +404,18 @@ export default function EmailIdentificacion() {
       return "0";
     }
   }, [messagesJson]);
+
+  useEffect(() => {
+    fetch("/api/identification/baja-status", { signal: AbortSignal.timeout(5000) })
+      .then((r) => r.json())
+      .then((data) => {
+        setBajaSmtpOk(Boolean(data.smtp_configured));
+        setBajaDestination(data.destination ?? null);
+      })
+      .catch(() => {
+        setBajaSmtpOk(false);
+      });
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -375,6 +492,14 @@ export default function EmailIdentificacion() {
         email_address: emailAddress.trim() || undefined,
         max_messages: Number(maxMessages) || 150,
       };
+      const normalizedTargets = Object.fromEntries(
+        Object.entries(searchTargets)
+          .map(([key, value]) => [key, value.trim()])
+          .filter(([, value]) => Boolean(value)),
+      );
+      if (Object.keys(normalizedTargets).length > 0) {
+        payload.search_targets = normalizedTargets;
+      }
 
       if (provider === "gmail") {
         if (!gmailAuth?.access_token) throw new Error("Conecta Gmail primero.");
@@ -400,6 +525,11 @@ export default function EmailIdentificacion() {
   };
 
   const canAnalyze = provider === "gmail" ? Boolean(gmailAuth?.access_token) : payloadPreview !== "0";
+  const draftDestination = useMemo(() => {
+    if (looksLikeEmail(emailAddress)) return emailAddress.trim().toLowerCase();
+    if (looksLikeEmail(gmailAuth?.email_address)) return (gmailAuth?.email_address ?? "").trim().toLowerCase();
+    return "";
+  }, [emailAddress, gmailAuth?.email_address]);
   const namesFound = useMemo(() => uniqueNames(result?.senders ?? []), [result]);
   const sendersWithPersonalData = useMemo(
     () => (result?.senders ?? []).filter((sender) =>
@@ -414,6 +544,7 @@ export default function EmailIdentificacion() {
   );
   const rankedSenders = useMemo(
     () => [...sendersWithPersonalData].sort((a, b) =>
+      ((b.matched_targets?.length ?? 0) > 0 ? 1 : 0) - ((a.matched_targets?.length ?? 0) > 0 ? 1 : 0) ||
       (b.personal_data_confidence ?? 0) - (a.personal_data_confidence ?? 0) ||
       (b.evidence?.message_count ?? 0) - (a.evidence?.message_count ?? 0) ||
       a.company_name.localeCompare(b.company_name),
@@ -421,13 +552,26 @@ export default function EmailIdentificacion() {
     [sendersWithPersonalData],
   );
   const summarySignals = useMemo(() => {
-    const names = (result?.senders ?? []).flatMap((sender) => sender.personal_names ?? []);
-    const addresses = (result?.senders ?? []).flatMap((sender) => (
-      sender.primary_personal_address ? [sender.primary_personal_address] : []
-    ));
-    const ruts = (result?.senders ?? []).flatMap((sender) => sender.personal_ruts ?? []);
-    const phones = (result?.senders ?? []).flatMap((sender) => sender.personal_phones ?? []);
-    const plates = (result?.senders ?? []).flatMap((sender) => sender.personal_plates ?? []);
+    const senders = result?.senders ?? [];
+    // Senders with target match are higher priority for "most probable"
+    const targetMatchedSenders = senders.filter((s) => (s.matched_targets?.length ?? 0) > 0);
+    const pickFrom = (field: "personal_names" | "personal_ruts" | "personal_phones" | "personal_plates") =>
+      targetMatchedSenders.length > 0
+        ? [...targetMatchedSenders.flatMap((s) => (s[field] as string[]) ?? []), ...senders.flatMap((s) => (s[field] as string[]) ?? [])]
+        : senders.flatMap((s) => (s[field] as string[]) ?? []);
+    const pickAddresses = () => {
+      if (targetMatchedSenders.length > 0) {
+        const targetAddresses = targetMatchedSenders.flatMap((s) => s.primary_personal_address ? [s.primary_personal_address] : []);
+        const allAddresses = senders.flatMap((s) => s.primary_personal_address ? [s.primary_personal_address] : []);
+        return [...targetAddresses, ...allAddresses];
+      }
+      return senders.flatMap((s) => s.primary_personal_address ? [s.primary_personal_address] : []);
+    };
+    const names = pickFrom("personal_names");
+    const addresses = pickAddresses();
+    const ruts = pickFrom("personal_ruts");
+    const phones = pickFrom("personal_phones");
+    const plates = pickFrom("personal_plates");
     const avgConfidence = sendersWithPersonalData.length > 0
       ? sendersWithPersonalData.reduce((acc, sender) => acc + (sender.personal_data_confidence ?? 0), 0) / sendersWithPersonalData.length
       : 0;
@@ -515,6 +659,73 @@ export default function EmailIdentificacion() {
     setSelectedSummarySignal(availableSummarySignal(summarySignals));
   }, [summarySignals]);
 
+  const openHeaderAnalysisView = () => {
+    if (!result) return;
+    navigate("/cabeceras-empresa-temp", {
+      state: {
+        prefilledResult: result,
+        source: "investigacion",
+      },
+    });
+  };
+
+  const openWebExposureView = () => {
+    if (!result) return;
+    const probableWebName = summarySignals.name.value ?? namesFound[0] ?? "";
+    const probableWebRut = summarySignals.rut.value ?? "";
+    const probableWebEmail = chooseWebSearchEmail(result.senders ?? [], emailAddress);
+
+    navigate("/exposicion-web-temp", {
+      state: {
+        source: "investigacion",
+        prefilledIdentity: {
+          nombre: probableWebName,
+          rut: probableWebRut,
+          email: probableWebEmail,
+        },
+      },
+    });
+  };
+
+  const openUnsubscribeDraft = async (sender: EmailSender) => {
+    setDraftError(null);
+    setDraftSuccess(null);
+    setSendingBaja(sender.company_name);
+
+    const holderEmail = draftDestination || result?.email_address || "usuario@desconocido";
+
+    try {
+      const res = await fetch("/api/identification/send-baja-report", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          holder_email: holderEmail,
+          sender,
+          access_token: gmailAuth?.access_token ?? null,
+          sender_email: gmailAuth?.email_address ?? null,
+        }),
+        signal: AbortSignal.timeout(30_000),
+      });
+
+      const data = await res.json();
+
+      if (!res.ok) {
+        setDraftError(data.detail ?? `Error ${res.status} al enviar el informe.`);
+        return;
+      }
+
+      setDraftSuccess(`Informe de ${sender.company_name} enviado a ${data.destination}.`);
+    } catch (err) {
+      setDraftError(err instanceof Error ? err.message : "No se pudo enviar el informe.");
+    } finally {
+      setSendingBaja(null);
+    }
+  };
+
+  const updateSearchTarget = (field: keyof SearchTargets, value: string) => {
+    setSearchTargets((previous) => ({ ...previous, [field]: value }));
+  };
+
   return (
     <Layout>
       <div className="mx-auto max-w-[1760px] space-y-8 px-2 sm:px-4 lg:px-6">
@@ -575,6 +786,67 @@ export default function EmailIdentificacion() {
                   {maxMessages === READ_ALL_MESSAGES_LIMIT
                     ? "Se intentaran revisar todos los mensajes disponibles de la cuenta."
                     : "Tambien puedes indicar un numero exacto de mensajes a revisar."}
+                </div>
+              </div>
+
+              <div className="space-y-3 rounded-2xl border border-emerald-500/15 bg-emerald-500/[0.04] p-4">
+                <div className="space-y-1">
+                  <Label className="text-sm">Parametros opcionales para mayor precision</Label>
+                  <p className="text-xs text-muted-foreground">
+                    Si completas estos datos, el analisis prioriza coincidencias de nombre, RUT, direccion, telefono y patente.
+                  </p>
+                </div>
+                <div className="grid gap-3 md:grid-cols-2">
+                  <div className="space-y-1.5">
+                    <Label htmlFor="targetNombre" className="text-xs text-muted-foreground">Nombre objetivo</Label>
+                    <Input
+                      id="targetNombre"
+                      value={searchTargets.nombre}
+                      onChange={(event) => updateSearchTarget("nombre", event.target.value)}
+                      placeholder="Nombre Apellido"
+                      className="h-10 text-sm"
+                    />
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label htmlFor="targetRut" className="text-xs text-muted-foreground">RUT objetivo</Label>
+                    <Input
+                      id="targetRut"
+                      value={searchTargets.rut}
+                      onChange={(event) => updateSearchTarget("rut", event.target.value)}
+                      placeholder="12.345.678-9"
+                      className="h-10 text-sm"
+                    />
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label htmlFor="targetDireccion" className="text-xs text-muted-foreground">Direccion objetivo</Label>
+                    <Input
+                      id="targetDireccion"
+                      value={searchTargets.direccion}
+                      onChange={(event) => updateSearchTarget("direccion", event.target.value)}
+                      placeholder="Av. Apoquindo 4501, Las Condes"
+                      className="h-10 text-sm"
+                    />
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label htmlFor="targetTelefono" className="text-xs text-muted-foreground">Telefono objetivo</Label>
+                    <Input
+                      id="targetTelefono"
+                      value={searchTargets.telefono}
+                      onChange={(event) => updateSearchTarget("telefono", event.target.value)}
+                      placeholder="+56 9 1234 5678"
+                      className="h-10 text-sm"
+                    />
+                  </div>
+                  <div className="space-y-1.5 md:col-span-2">
+                    <Label htmlFor="targetPatente" className="text-xs text-muted-foreground">Patente objetivo</Label>
+                    <Input
+                      id="targetPatente"
+                      value={searchTargets.patente}
+                      onChange={(event) => updateSearchTarget("patente", event.target.value.toUpperCase())}
+                      placeholder="ABCD12"
+                      className="h-10 text-sm"
+                    />
+                  </div>
                 </div>
               </div>
 
@@ -667,6 +939,15 @@ export default function EmailIdentificacion() {
                   <p className="mt-1 text-sm text-muted-foreground">
                     Ordenadas por la fuerza de las señales personales encontradas en tus correos.
                   </p>
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    {gmailAuth
+                      ? `Los informes de baja se enviarán a: ${gmailAuth.email_address ?? "tu Gmail"}`
+                      : bajaSmtpOk === false
+                        ? "Conecta tu Gmail para poder enviar informes de baja"
+                        : bajaDestination
+                          ? `Los informes de baja se enviarán a: ${bajaDestination}`
+                          : "Conecta tu Gmail para poder enviar informes de baja"}
+                  </p>
                 </div>
                 {rankedSenders[0] && (
                   <div className="rounded-2xl border border-emerald-500/20 bg-emerald-500/10 px-4 py-3">
@@ -703,10 +984,31 @@ export default function EmailIdentificacion() {
                             <Badge variant={riskVariant(sender.risk.level)}>{sender.risk.level}</Badge>
                             <Badge variant="secondary" className="bg-emerald-500 text-white hover:bg-emerald-500/90">conf. {confidenceLabel(sender.personal_data_confidence)}</Badge>
                             <Badge variant="outline">{sender.evidence?.message_count ?? 0} correos</Badge>
+                            {sender.matched_targets && sender.matched_targets.length > 0 && (
+                              <Badge className="bg-amber-500 text-white hover:bg-amber-500/90">
+                                ✓ Coincide con objetivo
+                              </Badge>
+                            )}
                           </div>
                         </div>
                       </AccordionTrigger>
                       <AccordionContent>
+                        <div className="mb-4 flex flex-wrap items-center justify-end gap-2">
+                          <Button
+                            type="button"
+                            variant="outline"
+                            className="border-emerald-500/30 text-emerald-700 hover:bg-emerald-500/10 dark:text-emerald-300"
+                            disabled={sendingBaja === sender.company_name || (!gmailAuth && !bajaSmtpOk)}
+                            title={!gmailAuth && !bajaSmtpOk ? "Conecta tu Gmail primero" : undefined}
+                            onClick={() => openUnsubscribeDraft(sender)}
+                          >
+                            {sendingBaja === sender.company_name
+                              ? <Loader2 className="h-4 w-4 animate-spin" />
+                              : <Mail className="h-4 w-4" />}
+                            {sendingBaja === sender.company_name ? "Enviando..." : "Pedir baja"}
+                          </Button>
+                        </div>
+
                         <div className="rounded-3xl border border-emerald-500/10 bg-gradient-to-br from-emerald-500/[0.07] via-background to-emerald-500/[0.03] p-5 sm:p-6">
                           <div className="grid gap-5 pt-1 xl:grid-cols-[180px_minmax(0,1.7fr)_minmax(0,1fr)_minmax(0,1fr)]">
                             <div className="space-y-2">
@@ -926,6 +1228,16 @@ export default function EmailIdentificacion() {
                     </AccordionItem>
                   ))}
                 </Accordion>
+                {draftError && (
+                  <div className="mt-3 rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+                    {draftError}
+                  </div>
+                )}
+                {draftSuccess && (
+                  <div className="mt-3 rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-sm text-emerald-700 dark:text-emerald-300">
+                    {draftSuccess}
+                  </div>
+                )}
               </CardContent>
             </Card>
 
@@ -1084,6 +1396,22 @@ export default function EmailIdentificacion() {
                 )}
               </CardContent>
             </Card>
+
+            <div className="flex flex-wrap justify-end gap-3">
+              <Button
+                variant="outline"
+                onClick={openWebExposureView}
+                className="h-12 border-emerald-500/35 bg-background text-emerald-700 hover:bg-emerald-500/10 dark:text-emerald-300"
+                disabled={!summarySignals.name.value && namesFound.length === 0}
+              >
+                <Telescope className="h-4 w-4" />
+                Buscar datos en la web
+              </Button>
+              <Button onClick={openHeaderAnalysisView} className="h-12 bg-emerald-500 text-white hover:bg-emerald-600">
+                <Link2 className="h-4 w-4" />
+                Ver cabeceras
+              </Button>
+            </div>
           </div>
         )}
       </div>
