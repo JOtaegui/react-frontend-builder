@@ -442,56 +442,82 @@ def extract_chilean_address_matches_with_context(
     return found[:5]
 
 
+_STREET_PREFIX_STRIP_RE = re.compile(
+    r"^(?:av(?:da)?\.?\s*|avenida\s+|calle\s+|pasaje\s+|psje\.?\s*|camino\s+|ruta\s+|autopista\s+)",
+    re.IGNORECASE,
+)
+_TRAILING_STREET_NUMBER_RE = re.compile(r"\s+\d{1,5}\b.*$")
+
+
+def _street_core(target: str) -> str:
+    """
+    Extrae solo el nombre de la calle, sin prefijo ni número.
+    "Av. Los Aromos 456, Providencia" → "los aromos"
+    """
+    norm = _nt(target.strip())
+    norm = _STREET_PREFIX_STRIP_RE.sub("", norm)
+    norm = _TRAILING_STREET_NUMBER_RE.sub("", norm)
+    return norm.strip(" ,.;:–-")
+
+
+def _accent_flexible_pattern(text: str) -> str:
+    """Convierte texto normalizado en regex que acepta letras con o sin tilde."""
+    mapping = {
+        "a": "[aáÁ]", "e": "[eéÉ]", "i": "[iíÍ]",
+        "o": "[oóÓ]", "u": "[uúÚü]", "n": "[nñÑ]",
+    }
+    parts = []
+    for ch in text:
+        if ch in mapping:
+            parts.append(mapping[ch])
+        elif ch.isalpha():
+            parts.append(f"[{ch.lower()}{ch.upper()}]")
+        else:
+            parts.append(re.escape(ch))
+    return "".join(parts)
+
+
 def find_address_near_target(content: str, target: str) -> str | None:
     """
-    Busca el texto del target en *content* y extrae la dirección más completa
-    encontrada en una ventana alrededor de esa aparición.
+    Busca en *content* la dirección completa que corresponde al *target* dado.
 
-    Usa un umbral de score más bajo (>= 1) porque ya sabemos que la calle
-    del usuario está ahí; solo necesitamos recuperar la forma completa
-    (nombre de calle + número + depto/comuna si los hay).
+    Estrategia (sin umbral de scoring):
+    1. Extrae el nombre de calle desnudo (sin prefijo, sin número).
+    2. Busca todas las ocurrencias de ese nombre en el contenido, tolerando
+       diferencias de tilde/mayúscula.
+    3. Para cada ocurrencia, aplica PREFIX_STREET_PATTERN y BARE_STREET_PATTERN
+       en una ventana y devuelve el match más largo que incluya la calle.
     """
     if not content or not target:
         return None
 
-    target_norm = _nt(target)
-    content_norm = _nt(content)
+    core = _street_core(target)
+    if not core or len(core) < 3:
+        return None
 
-    # Buscar todas las apariciones del target en el contenido
-    search_start = 0
-    best: tuple[str, int] | None = None  # (address, score)
+    street_re = re.compile(
+        r"(?i)\b" + _accent_flexible_pattern(core) + r"\b",
+        re.UNICODE,
+    )
 
-    while True:
-        idx = content_norm.find(target_norm, search_start)
-        if idx < 0:
-            break
+    best: tuple[str, int] | None = None  # (address, length)
 
-        s = max(0, idx - 100)
-        e = min(len(content), idx + len(target) + 200)
+    for m in street_re.finditer(content):
+        s = max(0, m.start() - 60)
+        e = min(len(content), m.end() + 150)
         window = content[s:e]
 
-        names: list[str] = []
-        ruts: list[str] = []
-
         for pattern in (PREFIX_STREET_PATTERN, BARE_STREET_PATTERN):
-            for m in pattern.finditer(window):
-                raw = _strip_trailing(m.group(0)).strip(" ,.;:–-")
+            for pm in pattern.finditer(window):
+                raw = _strip_trailing(pm.group(0)).strip(" ,.;:–-")
                 norm = _clean_address(raw)
                 if not norm:
                     continue
-                if target_norm not in _nt(norm):
-                    continue  # solo nos interesan matches que contengan el target
-                ws = max(0, m.start() - 150)
-                we = min(len(window), m.end() + 150)
-                ctx = window[ws:we]
-                score = _score_address(ctx, norm, names, ruts, explicit_label=False)
-                # Umbral reducido para búsqueda dirigida
-                if score >= 1:
-                    norm = _append_commune(norm, window[m.end(): m.end() + 80])
-                    if best is None or score > best[1] or len(norm) > len(best[0]):
-                        best = (norm, score)
-
-        search_start = idx + 1
+                if core not in _nt(norm):
+                    continue
+                norm = _append_commune(norm, window[pm.end(): pm.end() + 80])
+                if best is None or len(norm) > best[1]:
+                    best = (norm, len(norm))
 
     return best[0] if best else None
 

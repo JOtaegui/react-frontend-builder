@@ -31,6 +31,7 @@ from core.personal_data import (
     select_primary_phone,
     select_primary_rut,
 )
+from core.personal_data.address_extractor import _street_core as _address_street_core
 
 from models.schemas import (
     AuthorizedEmailMessage,
@@ -955,15 +956,17 @@ def _parse_message(message: AuthorizedEmailMessage, search_targets: Optional[Ema
             # 1) Buscar en direcciones ya extraídas (match flexible)
             matched_addresses = [v for v in personal_addresses if _address_related(v, target_direccion)]
 
-            # 2) Si no hay match, buscar en el contenido COMPLETO (no truncado)
-            if not matched_addresses and _contains_normalized(content, target_direccion):
+            # 2) Si no hay match directo, buscar por nombre de calle en el contenido
+            #    (usando street core: sin prefijo ni número para mayor cobertura)
+            street_core = _address_street_core(target_direccion)
+            content_has_street = bool(street_core and street_core in _normalize_free_text(content))
+            if not matched_addresses and content_has_street:
                 recovered = find_address_near_target(content, target_direccion)
                 if recovered:
                     matched_addresses = [recovered]
 
-            # 3) Si la dirección completa no aparece, buscar solo la calle
-            #    para al menos confirmar que el remitente conoce esa calle
-            found_street_only = not matched_addresses and _contains_normalized(content, target_direccion)
+            # 3) Si la calle aparece pero no se pudo extraer la dirección completa
+            found_street_only = not matched_addresses and content_has_street
 
             if matched_addresses or found_street_only:
                 best_target = matched_addresses[0] if matched_addresses else target_direccion
