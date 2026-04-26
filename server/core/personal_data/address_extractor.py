@@ -329,6 +329,8 @@ _GENERIC_TOKENS: frozenset[str] = frozenset({
     # Financial/banking terms that appear before numbers but are NOT addresses
     "debito", "credito", "ultimos", "primeros", "digitos", "visa", "mastercard",
     "meses", "cuota", "saldo", "monto", "cargo", "abono", "pago", "cobro",
+    # E-commerce / shipping cost context
+    "costo", "tarifa", "valor", "precio", "subtotal", "total", "free",
 })
 
 # ---------------------------------------------------------------------------
@@ -630,7 +632,11 @@ def _extract_labeled_candidates(content: str) -> list[tuple[str, str]]:
 
 def _looks_like_address(value: str) -> bool:
     nv = _nt(value)
-    if not re.search(r"(?<!\d)\d{1,5}(?!\d)", nv):
+    m_num = re.search(r"(?<!\d)\d{1,5}(?!\d)", nv)
+    if not m_num:
+        return False
+    # Número 0 no es válido como número de calle
+    if m_num.group(0) == "0":
         return False
     if _is_generic_phrase(nv):
         return False
@@ -638,19 +644,21 @@ def _looks_like_address(value: str) -> bool:
     meaningful = [w for w in words if w not in _STOPWORDS and w not in _GENERIC_TOKENS]
     if not meaningful:
         return False
+    # Rechazar si el nombre de calle contiene tokens genéricos de e-commerce/finanzas
+    before_num = nv[:m_num.start()].strip()
+    words_before = re.findall(r"[a-záéíóúüñ]{3,}", before_num)
+    if any(w in _GENERIC_TOKENS for w in words_before):
+        return False
     if re.search(r"\b(av(?:da)?\.?|avenida|calle|pasaje|psje\.?|camino|ruta|"
                  r"pje\.?|parcela|poblacion|villa|condominio)\b", nv):
         return True
-    m = re.search(r"(?<!\d)\d{1,5}(?!\d)", nv)
-    if m:
-        before = nv[:m.start()].strip()
-        words_before = [w for w in re.findall(r"[a-záéíóúüñ]{2,}", before) if w not in _STOPWORDS]
-        # Con 1 palabra de ≥ 5 chars también aceptamos
-        if len(words_before) >= 2:
+    if m_num:
+        before = nv[:m_num.start()].strip()
+        words_b = [w for w in re.findall(r"[a-záéíóúüñ]{2,}", before) if w not in _STOPWORDS]
+        if len(words_b) >= 2:
             return True
-        if len(words_before) == 1 and len(words_before[0]) >= 5:
+        if len(words_b) == 1 and len(words_b[0]) >= 5:
             return True
-    # Si contiene nombre de comuna conocida, también es candidata
     if _find_commune_in_text(nv):
         return True
     return False

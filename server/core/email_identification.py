@@ -232,6 +232,7 @@ class SenderAggregate:
     suspicious_infrastructure: bool = False
     aggressive_marketing: bool = False
     matched_target_types: set[str] = field(default_factory=set)
+    target_matched_address_fps: set[str] = field(default_factory=set)
     whois: Optional[WhoisSummary] = None
 
 
@@ -933,6 +934,7 @@ def _parse_message(message: AuthorizedEmailMessage, search_targets: Optional[Ema
 
     # ── Objetivos opcionales para búsqueda de mayor precisión ────────────────
     matched_target_types: set[str] = set()
+    target_address_fps: set[str] = set()
 
     if search_targets is not None:
         target_nombre    = (search_targets.nombre    or "").strip()
@@ -982,6 +984,8 @@ def _parse_message(message: AuthorizedEmailMessage, search_targets: Optional[Ema
                 if "direccion" not in personal_data_types:
                     personal_data_types.append("direccion")
                 matched_target_types.add("direccion")
+                if matched_addresses:
+                    target_address_fps.add(address_fingerprint(best_target))
 
         # ── RUT ───────────────────────────────────────────────────────────────
         if target_rut:
@@ -1063,6 +1067,7 @@ def _parse_message(message: AuthorizedEmailMessage, search_targets: Optional[Ema
         "newsletter": any(hint in content_lower for hint in NEWSLETTER_HINTS),
         "marketing": any(word in content_lower for word in ("descuento", "oferta", "promo", "sale", "cyber", "black friday")),
         "matched_target_types": matched_target_types,
+        "target_address_fps": target_address_fps,
     }
 
 
@@ -1139,6 +1144,7 @@ def _merge_message(record: SenderAggregate, parsed: dict[str, Any]) -> None:
         record.tags.add("marketing")
 
     record.matched_target_types.update(parsed.get("matched_target_types", set()))
+    record.target_matched_address_fps.update(parsed.get("target_address_fps", set()))
 
     mismatched_domains = {
         domain for domain in parsed["reply_to_domains"] + parsed["return_path_domains"] + parsed["auth_domains"]
@@ -1228,6 +1234,8 @@ def _to_identified_sender(sender: SenderAggregate) -> IdentifiedSender:
         ordered_fingerprints = sorted(
             sender.personal_address_display_by_fingerprint.keys(),
             key=lambda fingerprint: (
+                # Target-matched addresses always come first
+                0 if fingerprint in sender.target_matched_address_fps else 1,
                 -(sender.personal_address_counts.get(fingerprint, 0)),
                 -(sender.personal_address_scores.get(fingerprint, 0)),
                 -_address_display_rank(sender.personal_address_display_by_fingerprint[fingerprint]),
@@ -1243,7 +1251,11 @@ def _to_identified_sender(sender: SenderAggregate) -> IdentifiedSender:
             sender.personal_address_display_by_fingerprint[fingerprint]: sender.personal_address_scores.get(fingerprint, 0)
             for fingerprint in ordered_fingerprints
         }
-        primary_address = select_primary_address(ordered_addresses, address_counts_by_value, address_scores_by_value)
+        # If we have a target-matched address, it's always the primary
+        if sender.target_matched_address_fps:
+            primary_address = ordered_addresses[0]
+        else:
+            primary_address = select_primary_address(ordered_addresses, address_counts_by_value, address_scores_by_value)
     else:
         ordered_addresses = sorted(sender.personal_addresses)
         primary_address = select_primary_address(ordered_addresses)
