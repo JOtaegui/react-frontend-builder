@@ -166,6 +166,9 @@ ADDRESS_LABEL_KEYWORDS: tuple[str, ...] = (
 ORDER_CONTEXT_KEYWORDS: tuple[str, ...] = (
     "pedido", "orden", "compra", "despacho", "envio", "entrega",
     "tracking", "seguimiento", "tarjeta", "solicitud",
+    # English equivalents (Uber, Amazon, etc.)
+    "delivery", "delivered", "pickup", "order", "shipment", "shipped",
+    "dispatch", "address", "ship to", "deliver to",
 )
 
 LOCATION_HINT_KEYWORDS: tuple[str, ...] = (

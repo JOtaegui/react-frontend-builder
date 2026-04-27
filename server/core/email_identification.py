@@ -958,17 +958,21 @@ def _parse_message(message: AuthorizedEmailMessage, search_targets: Optional[Ema
             # 1) Buscar en direcciones ya extraídas (match flexible)
             matched_addresses = [v for v in personal_addresses if _address_related(v, target_direccion)]
 
-            # 2) Si no hay match directo, buscar por nombre de calle en el contenido
-            #    (usando street core: sin prefijo ni número para mayor cobertura)
-            street_core = _address_street_core(target_direccion)
-            content_has_street = bool(street_core and street_core in _normalize_free_text(content))
-            if not matched_addresses and content_has_street:
+            # 2) Siempre intentar extracción directa por nombre de calle.
+            #    No gateamos en content_has_street para evitar fallos por edge cases
+            #    (contenido codificado, caracteres especiales, etc.).
+            if not matched_addresses:
                 recovered = find_address_near_target(content, target_direccion)
                 if recovered:
                     matched_addresses = [recovered]
 
-            # 3) Si la calle aparece pero no se pudo extraer la dirección completa
-            found_street_only = not matched_addresses and content_has_street
+            # 3) Si la dirección completa no se pudo extraer, verificar si la
+            #    calle al menos aparece en el contenido
+            street_core = _address_street_core(target_direccion)
+            found_street_only = (
+                not matched_addresses
+                and bool(street_core and street_core in _normalize_free_text(content))
+            )
 
             if matched_addresses or found_street_only:
                 best_target = matched_addresses[0] if matched_addresses else target_direccion
@@ -984,8 +988,7 @@ def _parse_message(message: AuthorizedEmailMessage, search_targets: Optional[Ema
                 if "direccion" not in personal_data_types:
                     personal_data_types.append("direccion")
                 matched_target_types.add("direccion")
-                if matched_addresses:
-                    target_address_fps.add(address_fingerprint(best_target))
+                target_address_fps.add(address_fingerprint(best_target))
 
         # ── RUT ───────────────────────────────────────────────────────────────
         if target_rut:
