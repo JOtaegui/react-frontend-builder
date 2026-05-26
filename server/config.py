@@ -7,18 +7,22 @@ from __future__ import annotations
 import os
 from dotenv import load_dotenv
 
-# 1. Credenciales base: server/.env del repo (en desarrollo) o REPO_DOTENV_PATH (en bundle)
-_repo_env = os.getenv("REPO_DOTENV_PATH") or os.path.join(os.path.dirname(__file__), ".env")
-if os.path.exists(_repo_env):
-    load_dotenv(_repo_env)
+# 1. Comportamiento original: busca .env subiendo directorios desde server/
+#    (encuentra server/.env, o el .env en la raíz del proyecto)
+load_dotenv()
 
-# 2. Override personal del usuario — ~/.emailanalyzer/.env (SMTP, destino baja, etc.)
-# Solo aplica valores no vacíos para no pisar las credenciales OAuth del repo.
+# 2. Bundle standalone: REPO_DOTENV_PATH apunta al .env empaquetado dentro del .app
+_repo_env = os.getenv("REPO_DOTENV_PATH")
+if _repo_env and os.path.exists(_repo_env):
+    load_dotenv(_repo_env, override=True)
+
+# 3. Override personal del usuario — ~/.emailanalyzer/.env
+#    Solo aplica valores no vacíos para no pisar credenciales del repo.
 _user_env = os.getenv("DOTENV_PATH")
 if _user_env and os.path.exists(_user_env):
     from dotenv import dotenv_values as _dotenv_values
     for _k, _v in _dotenv_values(_user_env).items():
-        if _v:  # ignorar claves con valor vacío
+        if _v:
             os.environ[_k] = _v
 
 # ── General ──────────────────────────────────────────────────────────────────
@@ -78,7 +82,7 @@ GOOGLE_OAUTH_REDIRECT_URI = os.getenv(
 )
 EMAIL_EXTRACTION_PROVIDER = os.getenv("EMAIL_EXTRACTION_PROVIDER", "none").strip().lower()
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.0-flash-lite")  # mayor throughput en free tier
 GOOGLE_OAUTH_SCOPES = [
     "openid",
     "email",

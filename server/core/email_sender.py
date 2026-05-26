@@ -34,6 +34,36 @@ def is_smtp_configured() -> bool:
     return bool(SMTP_HOST and SMTP_USER and SMTP_PASSWORD)
 
 
+async def send_correo_via_gmail_api(
+    *,
+    access_token: str,
+    from_address: str,
+    destination: str,
+    subject: str,
+    html_body: str,
+    text_body: str,
+) -> None:
+    """Envía un correo arbitrario via Gmail API con contenido preformateado."""
+    msg = MIMEMultipart("alternative")
+    msg["Subject"] = subject
+    msg["From"] = from_address
+    msg["To"] = destination
+    msg.attach(MIMEText(text_body, "plain", "utf-8"))
+    msg.attach(MIMEText(html_body, "html", "utf-8"))
+
+    raw = base64.urlsafe_b64encode(msg.as_bytes()).decode("utf-8")
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        response = await client.post(
+            GMAIL_SEND_URL,
+            json={"raw": raw},
+            headers={"Authorization": "Bearer " + access_token},
+        )
+        response.raise_for_status()
+
+    logger.info("Correo enviado via Gmail API a %s | asunto: %s", destination, subject)
+
+
 async def send_baja_report_via_gmail_api(
     *,
     access_token: str,
@@ -221,6 +251,244 @@ def _section(title: str, content: str) -> str:
         + content +
         '</div>'
     )
+
+
+def build_baja_con_evidencia_html(
+    sender: IdentifiedSender,
+    holder_email: str,
+    numero: int,
+    baja_legal_html: str,
+    baja_legal_text: str,
+) -> tuple[str, str]:
+    """
+    Construye un email combinado para el titular (no para la empresa):
+    - Encabezado de "copia para ti"
+    - Informe de evidencia completa (datos personales, IPs, correos)
+    - Texto legal de la solicitud que se enviaría a la empresa
+
+    Retorna (html, text_plano).
+    """
+    ev = sender.evidence
+    data_labels = [PERSONAL_DATA_LABELS.get(t, t) for t in (sender.personal_data_types or [])]
+    ips = ev.header_ips or []
+    chile_ips = ev.header_ip_chile_matches or []
+
+    risk_colors = {"low": "#10b981", "medium": "#f59e0b", "high": "#ef4444"}
+    risk_names  = {"low": "Bajo", "medium": "Medio", "high": "Alto"}
+    risk_color = risk_colors.get(sender.risk.level, "#6b7280")
+    risk_name  = risk_names.get(sender.risk.level, sender.risk.level.upper())
+
+    tone_colors = {1: "#10b981", 2: "#f59e0b"}
+    tone_labels = {
+        1: "Solicitud N°1 — Formal",
+        2: "Solicitud N°2 — Advertencia de denuncia",
+    }
+    tone_color = tone_colors.get(min(numero, 2), "#ef4444")
+    tone_label = tone_labels.get(min(numero, 2), f"Solicitud N°{numero} — Denuncia inminente")
+
+    no_val = "<em style='color:#9ca3af'>No detectado</em>"
+
+    def badges(values: list[str], color: str = "#10b981", limit: int = 8) -> str:
+        cleaned = [v.strip() for v in values if v and v.strip()][:limit]
+        if not cleaned:
+            return no_val
+        return " ".join(_badge(v, color) for v in cleaned)
+
+    names_html   = badges(sender.personal_names or [])
+    addrs_html   = badges(sender.personal_addresses or [], "#6366f1")
+    ruts_html    = badges(sender.personal_ruts or [], "#f59e0b")
+    phones_html  = badges(sender.personal_phones or [], "#0ea5e9")
+    plates_html  = badges(sender.personal_plates or [], "#8b5cf6")
+    types_html   = badges(data_labels) or "<em style='color:#9ca3af'>Sin tipificar</em>"
+    ips_html     = badges(ips, "#6b7280", 12) if ips else "<em style='color:#9ca3af'>No detectadas</em>"
+    cl_ips_html  = badges(chile_ips, "#10b981") if chile_ips else "<em style='color:#9ca3af'>Ninguna</em>"
+
+    subjects_html = "".join(
+        '<div style="background:#f9fafb;border:1px solid #e5e7eb;border-radius:6px;'
+        'padding:6px 10px;font-size:12px;color:#374151;margin-bottom:4px;">' + s + '</div>'
+        for s in (ev.sample_subjects or [])[:5]
+    ) or "<em style='color:#9ca3af;font-size:12px;'>Sin muestra</em>"
+
+    from_addrs_html = badges(ev.from_addresses or [], "#374151")
+    rt_addrs_html   = badges(ev.reply_to_addresses or [], "#374151")
+    rp_addrs_html   = badges(ev.return_path_addresses or [], "#374151")
+
+    risk_reasons_html = "".join(
+        '<li style="font-size:12px;color:#374151;margin-bottom:4px;">' + r + '</li>'
+        for r in (sender.risk.reasons or [])
+    )
+    risk_ul = (
+        '<ul style="margin:6px 0 0 0;padding-left:20px;">' + risk_reasons_html + '</ul>'
+        if risk_reasons_html else ""
+    )
+
+    # ── Legal text section (styled) ──────────────────────────────────────────
+    # Strip outer HTML from baja_legal_html to embed as a section
+    import re as _re
+    body_match = _re.search(r'<body[^>]*>(.*?)</body>', baja_legal_html, _re.DOTALL | _re.IGNORECASE)
+    legal_inner = body_match.group(1).strip() if body_match else (
+        '<pre style="font-family:inherit;font-size:13px;white-space:pre-wrap;">'
+        + baja_legal_text + '</pre>'
+    )
+
+    html = f"""<!DOCTYPE html>
+<html lang="es">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>Copia solicitud de baja — {sender.company_name}</title></head>
+<body style="margin:0;padding:0;background:#f3f4f6;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;">
+<div style="max-width:700px;margin:28px auto;background:#fff;border-radius:14px;overflow:hidden;box-shadow:0 4px 24px rgba(0,0,0,0.08);">
+
+  <!-- header -->
+  <div style="background:linear-gradient(135deg,#1e3a5f,#2563eb);padding:28px 36px;">
+    <div style="font-size:11px;letter-spacing:.15em;text-transform:uppercase;color:#93c5fd;margin-bottom:6px;">
+      Copia para ti · {tone_label}
+    </div>
+    <div style="font-size:22px;font-weight:700;color:#fff;margin-bottom:4px;">{sender.company_name}</div>
+    <div style="font-size:13px;color:#bfdbfe;">{sender.primary_domain} · {sender.country}</div>
+  </div>
+
+  <div style="padding:28px 36px;">
+
+    <!-- aviso -->
+    <div style="background:#eff6ff;border:1px solid #bfdbfe;border-radius:10px;padding:14px 18px;margin-bottom:24px;">
+      <div style="font-size:12px;color:#1e40af;font-weight:600;text-transform:uppercase;letter-spacing:.08em;margin-bottom:4px;">
+        Esta es tu copia
+      </div>
+      <div style="font-size:13px;color:#1e3a8a;">
+        La solicitud fue enviada a <strong>{sender.primary_domain}</strong>.
+        Este correo resume la evidencia que respalda tu pedido.
+      </div>
+    </div>
+
+    <!-- SECCIÓN 1: datos personales -->
+    <div style="margin-bottom:22px;">
+      <div style="font-size:11px;font-weight:600;letter-spacing:.1em;text-transform:uppercase;color:#2563eb;margin-bottom:10px;">
+        1 — Datos personales que esta empresa tiene de ti
+      </div>
+      <table style="border-collapse:collapse;width:100%;">
+        {_row("Tipos de datos", types_html)}
+        {_row("Nombre(s)", names_html)}
+        {_row("Dirección(es)", addrs_html)}
+        {_row("RUT(s)", ruts_html)}
+        {_row("Teléfono(s)", phones_html)}
+        {_row("Patente(s)", plates_html)}
+      </table>
+    </div>
+
+    <!-- SECCIÓN 2: actividad -->
+    <div style="margin-bottom:22px;">
+      <div style="font-size:11px;font-weight:600;letter-spacing:.1em;text-transform:uppercase;color:#2563eb;margin-bottom:10px;">
+        2 — Actividad detectada en tu bandeja
+      </div>
+      <table style="border-collapse:collapse;width:100%;">
+        {_row("Correos enviados", f'<strong style="font-size:16px;">{ev.message_count}</strong>')}
+        {_row("En spam", str(ev.spam_count))}
+        {_row("En papelera", str(ev.trash_count))}
+        {_row("Primer correo", ev.first_seen or "Desconocido")}
+        {_row("Último correo", ev.last_seen or "Desconocido")}
+        {_row("From", from_addrs_html)}
+        {_row("Reply-To", rt_addrs_html)}
+        {_row("Return-Path", rp_addrs_html)}
+      </table>
+      <div style="margin-top:12px;">
+        <div style="font-size:11px;color:#6b7280;text-transform:uppercase;letter-spacing:.08em;margin-bottom:6px;">Asuntos detectados</div>
+        {subjects_html}
+      </div>
+    </div>
+
+    <!-- SECCIÓN 3: IPs -->
+    <div style="margin-bottom:22px;">
+      <div style="font-size:11px;font-weight:600;letter-spacing:.1em;text-transform:uppercase;color:#2563eb;margin-bottom:10px;">
+        3 — IPs en cabeceras de correo
+      </div>
+      <table style="border-collapse:collapse;width:100%;">
+        {_row(f"Todas las IPs ({len(ips)})", ips_html)}
+        {_row(f"IPs chilenas ({len(chile_ips)})", cl_ips_html)}
+      </table>
+      {"<div style='font-size:12px;color:#065f46;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:6px;padding:8px 12px;margin-top:8px;'>✅ Se detectaron IPs asociadas a Chile — posible tratamiento de datos dentro del país.</div>" if chile_ips else ""}
+    </div>
+
+    <!-- SECCIÓN 4: riesgo -->
+    <div style="margin-bottom:22px;">
+      <div style="font-size:11px;font-weight:600;letter-spacing:.1em;text-transform:uppercase;color:#2563eb;margin-bottom:10px;">
+        4 — Nivel de riesgo
+      </div>
+      <div style="display:inline-block;background:{risk_color}22;color:{risk_color};border:1px solid {risk_color}55;
+        border-radius:8px;padding:4px 16px;font-weight:600;font-size:14px;margin-bottom:8px;">{risk_name.upper()}</div>
+      {risk_ul}
+    </div>
+
+    <!-- SECCIÓN 5: texto legal enviado -->
+    <div style="margin-bottom:8px;">
+      <div style="font-size:11px;font-weight:600;letter-spacing:.1em;text-transform:uppercase;color:{tone_color};margin-bottom:12px;">
+        5 — Texto legal enviado a la empresa
+      </div>
+      {legal_inner}
+    </div>
+
+  </div>
+</div>
+</body></html>"""
+
+    # ── Plain text version ────────────────────────────────────────────────────
+    def lbl(vals: list[str], fallback: str = "No detectado") -> str:
+        cleaned = [v.strip() for v in vals if v and v.strip()]
+        return ", ".join(cleaned[:8]) if cleaned else fallback
+
+    text = "\n".join([
+        f"=== COPIA SOLICITUD DE BAJA N°{numero} — {sender.company_name} ===",
+        f"Empresa: {sender.company_name} ({sender.primary_domain})",
+        f"País: {sender.country}",
+        "",
+        "--- DATOS PERSONALES DETECTADOS ---",
+        f"Tipos      : {lbl(data_labels)}",
+        f"Nombre(s)  : {lbl(sender.personal_names or [])}",
+        f"Dirección  : {lbl(sender.personal_addresses or [])}",
+        f"RUT(s)     : {lbl(sender.personal_ruts or [])}",
+        f"Teléfono(s): {lbl(sender.personal_phones or [])}",
+        f"Patente(s) : {lbl(sender.personal_plates or [])}",
+        "",
+        "--- ACTIVIDAD ---",
+        f"Correos enviados : {ev.message_count}",
+        f"Spam             : {ev.spam_count}",
+        f"Papelera         : {ev.trash_count}",
+        f"Primer correo    : {ev.first_seen or 'Desconocido'}",
+        f"Último correo    : {ev.last_seen or 'Desconocido'}",
+        f"From             : {lbl(ev.from_addresses or [])}",
+        f"Asuntos          : {lbl(ev.sample_subjects or [], 'Sin muestra')}",
+        "",
+        "--- IPs EN CABECERAS ---",
+        f"Total IPs   : {len(ips)} — {lbl(ips, 'No detectadas')}",
+        f"IPs chilenas: {len(chile_ips)} — {lbl(chile_ips, 'Ninguna')}",
+        "",
+        "--- RIESGO ---",
+        f"Nivel: {risk_name.upper()}",
+        *(["Razones: " + r for r in (sender.risk.reasons or [])]),
+        "",
+        "--- TEXTO LEGAL ENVIADO A LA EMPRESA ---",
+        baja_legal_text,
+    ])
+
+    return html, text
+
+
+async def send_simple_email(
+    *,
+    to: str,
+    subject: str,
+    html: str,
+    text: str,
+) -> None:
+    """Envía un correo simple via SMTP. Silencia errores para no romper el seed."""
+    if not is_smtp_configured():
+        logger.info("[demo-email] SMTP no configurado, skip: %s → %s", subject, to)
+        return
+    try:
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, _send_smtp, to, subject, html, text)
+        logger.info("[demo-email] Enviado: %s → %s", subject, to)
+    except Exception as exc:
+        logger.warning("[demo-email] Error enviando: %s", exc)
 
 
 def _build_html_report(sender: IdentifiedSender, holder_email: str) -> str:

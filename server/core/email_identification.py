@@ -30,8 +30,8 @@ from core.personal_data import (
     select_primary_plate,
     select_primary_phone,
     select_primary_rut,
+    street_core as _address_street_core,
 )
-from core.personal_data.address_extractor import _street_core as _address_street_core
 
 from models.schemas import (
     AuthorizedEmailMessage,

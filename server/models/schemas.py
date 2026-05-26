@@ -233,6 +233,7 @@ class EmailIdentificationResponse(BaseModel):
     summary: EmailIdentificationSummary
     senders: list[IdentifiedSender] = []
     analyzed_domains: list[str] = []
+    baja_violations: list["BajaViolationFound"] = []
 
 
 # ── Contenedor de todas las fuentes ─────────────────────────────────────────
@@ -278,3 +279,54 @@ class OSINTResponse(BaseModel):
 class ModuleError(BaseModel):
     module: str
     error: str
+
+
+# ── Baja automática ───────────────────────────────────────────────────────────
+
+class BajaViolationFound(BaseModel):
+    """Un correo recibido de un dominio con baja activa, posterior a la solicitud."""
+    baja_id: str
+    dominio: str
+    empresa: str
+    numero_solicitud: int
+    message_id: str
+    received_at: str
+    subject: Optional[str] = None
+    from_address: Optional[str] = None
+    snippet: Optional[str] = None
+
+
+class BajaRecord(BaseModel):
+    """Estado completo de una solicitud de baja con su historial y violaciones."""
+    id: str
+    dominio: str
+    empresa: str
+    estado: str                     # SOLICITADA|CUMPLIDA|VENCIDA|REINCIDENTE|DENUNCIADA
+    numero_solicitud: int
+    fecha_solicitud: str
+    fecha_limite: str
+    fecha_acuse: Optional[str] = None
+    destinatario: str
+    holder_email: str
+    baja_anterior_id: Optional[str] = None
+    violations: list[BajaViolationFound] = []
+    dias_restantes: Optional[int] = None
+    dias_en_mora: Optional[int] = None
+
+
+class SolicitarBajaRequest(BaseModel):
+    sender: IdentifiedSender
+    holder_email: str
+    destinatario: str               # email de privacidad de la empresa
+    access_token: Optional[str] = None
+    sender_email: Optional[str] = None
+
+
+class MarcarCumplidaRequest(BaseModel):
+    evidencia_aportada: Optional[str] = None
+
+
+class ReescalarRequest(BaseModel):
+    access_token: Optional[str] = None
+    destinatario: Optional[str] = None
+    sender_email: Optional[str] = None

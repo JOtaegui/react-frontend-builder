@@ -9,3 +9,4 @@ aiosqlite==0.20.0
 selenium==4.31.0
 undetected-chromedriver==3.5.5
 pypdf==5.4.0
+ddgs>=0.1.0

@@ -153,14 +153,22 @@ _COMUNAS_CHILE: frozenset[str] = frozenset({
 # ---------------------------------------------------------------------------
 
 ADDRESS_LABEL_KEYWORDS: tuple[str, ...] = (
+    # Formas compuestas
     "direccion de despacho", "direccion de envio", "direccion de entrega",
-    "direccion cliente", "direccion del cliente", "domicilio",
+    "direccion de facturacion", "direccion de residencia", "direccion del pedido",
+    "direccion cliente", "direccion del cliente", "direccion registrada",
     "shipping address", "delivery address", "ship to", "deliver to",
     "enviar a", "envio a", "despacho a", "entrega en",
     "entregaremos en", "entregaremos tu tarjeta en",
-    "tu direccion", "su direccion", "direccion de facturacion",
-    "lugar de entrega", "direccion de envio", "tu domicilio",
-    "su domicilio", "direccion registrada", "direccion de residencia",
+    "tu direccion", "su direccion", "mi direccion",
+    "lugar de entrega", "lugar de despacho",
+    "tu domicilio", "su domicilio", "mi domicilio",
+    "entregado en", "entregamos en",
+    "sera enviado a", "sera enviada a",
+    "llega a", "pedido enviado a",
+    "tu pedido llegara a", "tu pedido fue entregado en",
+    # Forma corta — sola — debe ir al final
+    "domicilio", "direccion",
 )
 
 ORDER_CONTEXT_KEYWORDS: tuple[str, ...] = (
@@ -237,14 +245,25 @@ _LONG_NUMBER_PATTERN = re.compile(r"\b\d{10,}\b")
 
 _INLINE_LABEL_RE = re.compile(
     r"(?i)"
-    r"(?:direccion\s+de\s+(?:despacho|envio|entrega)|direccion\s+(?:del?\s+)?cliente|"
-    r"domicilio|shipping\s+address|delivery\s+address|ship\s+to|deliver\s+to|"
-    r"enviar\s+a|envio\s+a|despacho\s+a|entrega\s+en|"
-    r"entregaremos(?:\s+tu\s+tarjeta)?\s+en|"
-    r"tu\s+(?:direccion|domicilio)|su\s+(?:direccion|domicilio)|"
-    r"lugar\s+de\s+entrega|direccion\s+registrada|"
-    r"direccion\s+de\s+residencia)"
-    r"\s*[:\-–]?\s*(.+)"
+    r"(?:"
+    # Formas compuestas específicas (mayor prioridad)
+    r"direccion\s+de\s+(?:despacho|envio|envío|entrega|facturacion|facturación|residencia)|"
+    r"direccion\s+(?:del?\s+)?(?:cliente|pedido|envio|entrega|registro|registrada)|"
+    r"domicilio(?:\s+(?:del?\s+)?(?:cliente|registrado|particular))?|"
+    r"shipping\s+address|delivery\s+address|ship\s+to|deliver\s+to|"
+    r"enviar\s+a|envio\s+a|envío\s+a|despacho\s+a|entrega\s+en|"
+    r"entregaremos(?:\s+(?:tu\s+tarjeta|tu\s+pedido))?\s+en|"
+    r"(?:tu|su|mi)\s+(?:direccion|domicilio)|"
+    r"lugar\s+de\s+(?:entrega|despacho)|"
+    r"sera\s+enviado\s+a|será\s+enviado\s+a|"
+    r"entregado\s+en|entregamos\s+en|entrega\s+a(?:\s+nombre\s+de)?|"
+    r"llega\s+a|pedido\s+(?:fue\s+)?enviado\s+a|"
+    r"tu\s+pedido\s+(?:llega(?:ra|rá)?\s+a|fue\s+entregado\s+en)|"
+    r"se\s+enviara\s+(?:a|al)|se\s+enviará\s+(?:a|al)|"
+    # Forma corta — solo "Dirección:" — al final para no eclipsar las compuestas
+    r"direccion"
+    r")"
+    r"\s*[:\-–>]?\s*(.+)"
 )
 
 # ---------------------------------------------------------------------------
@@ -262,6 +281,19 @@ _TRAILING_RE = re.compile(
 
 _TRAILING_PHONE_RE = re.compile(
     r"(?i)\s*[-/]\s*(?:\+?56\s*)?(?:9|2)\s*[\d\s()./-]{8,}$"
+)
+
+# Elimina atribuciones de entrega al final: "Delivered By X", "Por X", etc.
+_TRAILING_ATTRIBUTION_RE = re.compile(
+    r"(?i)"
+    r"(?:"
+        r"\s*[-–,/]?\s*(?:delivered|entregado|firmado|recibido|aceptado|retirado)"
+        r"(?:\s+(?:by|por|a\s+cargo\s+de))?\s+[A-Za-záéíóúüñÁÉÍÓÚÜÑ].*"
+    r"|"
+        # "By Nombre" o "Por Nombre" sin verbo anterior
+        r"\s+(?:by|por)\s+[A-ZÁÉÍÓÚÜÑ][A-Za-záéíóúüñÁÉÍÓÚÜÑ].*"
+    r")"
+    r"$"
 )
 
 # ---------------------------------------------------------------------------
@@ -334,6 +366,17 @@ _GENERIC_TOKENS: frozenset[str] = frozenset({
     "meses", "cuota", "saldo", "monto", "cargo", "abono", "pago", "cobro",
     # E-commerce / shipping cost context
     "costo", "tarifa", "valor", "precio", "subtotal", "total", "free",
+    # Delivery / logistics labels that precede an address but are NOT part of it
+    "delivery", "delivered", "pickup", "dispatch", "dispatched",
+    "shipped", "shipment", "entregado", "retirado", "recibido",
+    # Customer service / contact numbers (e.g. "Contáctanos 600", "Llámanos 800")
+    "contactanos", "contactenos", "contacte", "contactar",
+    "llamanos", "llamenos", "llama", "llame",
+    "escribenos", "escríbenos", "escribenos", "escriba",
+    "comunicate", "comuniquese", "comuníquese",
+    "visitanos", "visítanos", "visita",
+    "atencion", "atención", "servicio", "soporte", "ayuda", "asistencia",
+    "sucursal", "sucursales", "tienda", "tiendas", "local", "locales",
 })
 
 # ---------------------------------------------------------------------------
@@ -393,6 +436,8 @@ def extract_chilean_address_matches_with_context(
     seen: set[str] = set()
 
     # ── Fase 1: candidatos con label explícito ────────────────────────────
+    # Threshold bajo (2): el label ya aporta +5, así que cualquier dirección
+    # válida bajo un label pasa.  El threshold evita ruido puro.
     for candidate, evidence in _extract_labeled_candidates(content):
         norm = _clean_address(candidate)
         if not norm or norm in seen:
@@ -402,7 +447,7 @@ def extract_chilean_address_matches_with_context(
         score = _score_address(evidence, norm, names, ruts, explicit_label=True)
         score += _cross_validate(evidence, nearby_phones, nearby_names,
                                   boost_if_near_phone, boost_if_near_name)
-        if score < 4:
+        if score < 2:
             continue
         seen.add(norm)
         found.append(AddressMatch(address=norm, evidence=_snippet(evidence), score=score))
@@ -419,6 +464,7 @@ def extract_chilean_address_matches_with_context(
         patterns_to_scan.append((BARE_STREET_PATTERN, bare_limit))
 
     for pattern, max_matches in patterns_to_scan:
+        is_bare = pattern is BARE_STREET_PATTERN
         for idx, m in enumerate(pattern.finditer(content)):
             if idx >= max_matches:
                 break
@@ -433,12 +479,27 @@ def extract_chilean_address_matches_with_context(
             window = content[s:e]
             if _has_disqualifying_context(norm, window):
                 continue
+
+            # ── Regla clave anti-falsos-positivos ────────────────────────────
+            # Para patrones sin prefijo de calle ("Av.", "Calle", etc.) se exige
+            # al menos una de estas señales fuertes en la ventana:
+            #   a) Un keyword de label de dirección ("Dirección:", "Enviado a:", …)
+            #   b) El nombre de una comuna chilena conocida
+            # Sin esto, cualquier "Contáctanos 600" o "Beneficio 12" pasa.
+            if is_bare:
+                has_label_near = any(_kw(_nt(window), kw) for kw in ADDRESS_LABEL_KEYWORDS)
+                has_commune_near = bool(_find_commune_in_text(window))
+                if not has_label_near and not has_commune_near:
+                    continue
+
             # Intentar capturar la comuna que sigue al número
             norm = _append_commune(norm, content[m.end(): m.end() + 60])
             score = _score_address(window, norm, names, ruts, explicit_label=False)
             score += _cross_validate(window, nearby_phones, nearby_names,
                                       boost_if_near_phone, boost_if_near_name)
-            if score < 4:
+            # Threshold: 3 si hay contexto de orden/entrega, 4 si no hay ninguna señal
+            threshold = 3 if has_address_context_hint else 4
+            if score < threshold:
                 continue
             seen.add(norm)
             found.append(AddressMatch(address=norm, evidence=_snippet(window), score=score))
@@ -448,13 +509,13 @@ def extract_chilean_address_matches_with_context(
 
 
 _STREET_PREFIX_STRIP_RE = re.compile(
-    r"^(?:av(?:da)?\.?\s*|avenida\s+|calle\s+|pasaje\s+|psje\.?\s*|camino\s+|ruta\s+|autopista\s+)",
+    r"^(?:avenida\s+|autopista\s+|av(?:da)?\.?\s*|calle\s+|pasaje\s+|psje\.?\s*|camino\s+|ruta\s+)",
     re.IGNORECASE,
 )
 _TRAILING_STREET_NUMBER_RE = re.compile(r"\s+\d{1,5}\b.*$")
 
 
-def _street_core(target: str) -> str:
+def street_core(target: str) -> str:
     """
     Extrae solo el nombre de la calle, sin prefijo ni número.
     "Av. Los Aromos 456, Providencia" → "los aromos"
@@ -463,6 +524,10 @@ def _street_core(target: str) -> str:
     norm = _STREET_PREFIX_STRIP_RE.sub("", norm)
     norm = _TRAILING_STREET_NUMBER_RE.sub("", norm)
     return norm.strip(" ,.;:–-")
+
+
+# Alias privado para compatibilidad interna (no exportar)
+_street_core = street_core
 
 
 def _accent_flexible_pattern(text: str) -> str:
@@ -482,6 +547,46 @@ def _accent_flexible_pattern(text: str) -> str:
     return "".join(parts)
 
 
+# Prefijos de tipo de calle válidos que pueden aparecer ANTES del nombre de calle
+_STREET_TYPE_ABBREVS: frozenset[str] = frozenset({
+    "av", "av.", "avda", "avda.", "avenida",
+    "calle", "pasaje", "pje", "pje.", "psje", "psje.",
+    "camino", "ruta", "autopista", "blvd", "blvd.", "boulevard",
+    "parcela", "villa", "condominio", "conjunto", "poblacion", "población",
+})
+
+
+def _trim_to_core(norm: str, norm_lower: str, core: str) -> str | None:
+    """
+    Si `norm` empieza con palabras ajenas al core (p.ej. "Delivery Río Thur 4827"),
+    recorta el inicio para que empiece desde el core o su prefijo de tipo calle.
+
+    Retorna None si el resultado queda demasiado corto para ser una dirección.
+    """
+    core_pos = norm_lower.find(core)
+    if core_pos == 0:
+        return norm  # ya empieza en el core, sin basura inicial
+
+    prefix_str = norm[:core_pos].rstrip()
+    prefix_words = prefix_str.split()
+
+    if prefix_words:
+        last_word = prefix_words[-1].rstrip(".,").lower()
+        if last_word in _STREET_TYPE_ABBREVS:
+            # El último token antes del core es un tipo de calle válido → conservarlo
+            # Ejemplo: "Calle Río Thur 4827" → mantener "Calle"
+            offset = core_pos - len(prefix_words[-1]) - 1
+            trimmed = norm[max(0, offset):].strip(" ,.;:–-")
+        else:
+            # Prefijo basura (ej. "Delivery") → empezar directo en el core
+            trimmed = norm[core_pos:].strip(" ,.;:–-")
+    else:
+        trimmed = norm[core_pos:].strip(" ,.;:–-")
+
+    trimmed = _capitalize_address(trimmed)
+    return trimmed if len(trimmed) >= 8 else None
+
+
 def find_address_near_target(content: str, target: str) -> str | None:
     """
     Busca en *content* la dirección completa que corresponde al *target* dado.
@@ -491,7 +596,10 @@ def find_address_near_target(content: str, target: str) -> str | None:
     2. Busca todas las ocurrencias de ese nombre en el contenido, tolerando
        diferencias de tilde/mayúscula.
     3. Para cada ocurrencia, aplica PREFIX_STREET_PATTERN y BARE_STREET_PATTERN
-       en una ventana y devuelve el match más largo que incluya la calle.
+       en una ventana, recorta prefijos basura y devuelve la mejor versión limpia.
+
+    La selección prefiere matches donde el core de calle está cerca del inicio
+    (evita "Delivery Río Thur 4827" → devuelve "Río Thur 4827").
     """
     if not content or not target:
         return None
@@ -505,7 +613,8 @@ def find_address_near_target(content: str, target: str) -> str | None:
         re.UNICODE,
     )
 
-    best: tuple[str, int] | None = None  # (address, length)
+    # (address, length, score): score = penaliza offset del core, premia longitud
+    best: tuple[str, int, int] | None = None
 
     for m in street_re.finditer(content):
         s = max(0, m.start() - 60)
@@ -518,11 +627,22 @@ def find_address_near_target(content: str, target: str) -> str | None:
                 norm = _clean_address(raw)
                 if not norm:
                     continue
-                if core not in _nt(norm):
+                norm_lower = _nt(norm)
+                if core not in norm_lower:
                     continue
+
+                # Recortar prefijo basura (ej. "Delivery Río Thur" → "Río Thur")
+                norm = _trim_to_core(norm, norm_lower, core)
+                if not norm:
+                    continue
+
                 norm = _append_commune(norm, window[pm.end(): pm.end() + 80])
-                if best is None or len(norm) > best[1]:
-                    best = (norm, len(norm))
+
+                # Puntuación: premia longitud y penaliza offset residual del core
+                core_offset = _nt(norm).find(core)
+                score = len(norm) - core_offset * 5
+                if best is None or score > best[2]:
+                    best = (norm, len(norm), score)
 
     return best[0] if best else None
 
@@ -715,10 +835,19 @@ def _append_commune(address: str, following: str) -> str:
 # ---------------------------------------------------------------------------
 
 def _truncate_at_prose(value: str) -> str:
-    """Corta el string en el primer indicador de prosa (no dirección)."""
+    """Corta el string en el primer indicador de prosa (no dirección).
+
+    No trunca si el punto es parte de una abreviatura como "Av.", "Pje.",
+    "Dr.", etc. (la palabra antes del punto tiene ≤ 4 caracteres).
+    """
     m = _SENTENCE_END_RE.search(value)
     if m:
-        value = value[:m.start()].strip(" ,.;:–-")
+        before = value[:m.start()]
+        words_before = re.findall(r"[A-Za-záéíóúüñÁÉÍÓÚÜÑ]+", before)
+        # Solo truncar si la palabra antes del punto es suficientemente larga
+        # para ser el final de una oración (no una abreviatura tipo "Av.", "Pje.")
+        if words_before and len(words_before[-1]) > 4:
+            value = before.strip(" ,.;:–-")
     m = _PROSE_BREAK_RE.search(value)
     if m:
         value = value[:m.start()].strip(" ,.;:–-")
@@ -728,6 +857,7 @@ def _truncate_at_prose(value: str) -> str:
 def _clean_address(value: str) -> str | None:
     value = _strip_trailing(value)
     value = _TRAILING_PHONE_RE.sub("", value)
+    value = _TRAILING_ATTRIBUTION_RE.sub("", value)   # quita "Delivered By X" etc.
     value = _truncate_at_prose(value)
     value = re.sub(r"\s+", " ", value).strip(" ,.;:–-")
 

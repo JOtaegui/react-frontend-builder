@@ -2,26 +2,99 @@ from __future__ import annotations
 
 import re
 
+# Palabras clave que indican que un número es efectivamente un RUT personal
+_RUT_LABEL_RE = re.compile(
+    r"(?i)\b(?:rut|r\.u\.t|run|r\.u\.n|rol\s+unico|rol\s+único|"
+    r"cedula|cédula|documento\s+de\s+identidad|id\s+tributari[oa])\b"
+)
+
+# Palabras clave de contexto personal que dan confianza (sin label directo)
+_PERSONAL_CONTEXT_RE = re.compile(
+    r"(?i)\b(?:nombre|cliente|titular|usuario|beneficiario|propietario|"
+    r"apellido|nacimiento|fecha\s+de\s+nacimiento|afiliado|asegurado|"
+    r"tomador|contratante|representante|trabajador|empleado)\b"
+)
+
+# Ventana de caracteres alrededor del match donde buscar contexto
+_CONTEXT_WINDOW = 200
+
 
 def extract_chilean_ruts(content: str) -> list[str]:
+    """
+    Extrae RUTs válidos del contenido.
+
+    Un RUT se incluye si:
+    - Tiene un label explícito cerca ("rut:", "run:", "cédula", etc.), O
+    - Está en un contexto personal (nombre, titular, cliente, etc.), O
+    - Aparece más de una vez en el contenido (alta confianza por repetición).
+
+    RUTs que aparecen solos sin ningún contexto (probable ID de orden/transacción)
+    son descartados para evitar falsos positivos.
+    """
     if not content:
         return []
 
-    found: list[str] = []
-    seen: set[str] = set()
-    for match in re.findall(r"\b\d{1,2}\.?\d{3}\.?\d{3}-[\dkK]\b", content):
-        normalized = _normalize_rut(match)
-        if normalized and normalized not in seen:
-            seen.add(normalized)
-            found.append(normalized)
+    scored: dict[str, int] = {}   # rut_normalizado → score máximo
+    content_lower = content.lower()
 
-    contextual_pattern = r"(?i)(?:rut|run|rol unico tributario|documento)\s*[:#]?\s*(\d{7,8}-[\dkK])"
-    for match in re.findall(contextual_pattern, content):
-        normalized = _normalize_rut(match)
-        if normalized and normalized not in seen:
-            seen.add(normalized)
-            found.append(normalized)
+    # ── 1) Patrón formateado con o sin puntos ─────────────────────────────
+    for m in re.finditer(r"\b\d{1,2}\.?\d{3}\.?\d{3}-[\dkK]\b", content):
+        normalized = _normalize_rut(m.group(0))
+        if not normalized:
+            continue
+        score = _context_score(content, m.start(), m.end())
+        # Bonus por repetición
+        count = len(re.findall(re.escape(m.group(0)), content))
+        if count >= 2:
+            score += 3
+        scored[normalized] = max(scored.get(normalized, 0), score)
+
+    # ── 2) Patrón contextual con label ("rut: 12345678-9") ─────────────────
+    for m in re.finditer(
+        r"(?i)(?:rut|run|r\.u\.t|cedula|cédula|documento)\s*[:#/]?\s*(\d{7,8}-[\dkK])",
+        content,
+    ):
+        normalized = _normalize_rut(m.group(1))
+        if not normalized:
+            continue
+        # Tiene label explícito → siempre confiable
+        scored[normalized] = max(scored.get(normalized, 0), 10)
+
+    # ── 3) Patrón sin guion (111111111 → 9 dígitos) ────────────────────────
+    # Solo con label explícito para evitar capturar números de orden/teléfono
+    for m in re.finditer(
+        r"(?i)(?:rut|run|r\.u\.t|cedula|cédula)\s*[:#/]?\s*(\d{8,9})\b",
+        content,
+    ):
+        normalized = _normalize_rut(m.group(1))
+        if not normalized:
+            continue
+        scored[normalized] = max(scored.get(normalized, 0), 10)
+
+    # Filtrar: solo incluir RUTs con score >= 2 (tienen contexto o se repiten)
+    MIN_SCORE = 2
+    found = [rut for rut, score in scored.items() if score >= MIN_SCORE]
+
+    # Ordenar por score descendente para que el más confiable quede primero
+    found.sort(key=lambda r: -scored[r])
     return found[:5]
+
+
+def _context_score(content: str, start: int, end: int) -> int:
+    """
+    Puntúa la confianza de un RUT según su contexto cercano.
+    0 = sin contexto personal (probable falso positivo)
+    """
+    s = max(0, start - _CONTEXT_WINDOW)
+    e = min(len(content), end + _CONTEXT_WINDOW)
+    window = content[s:e]
+
+    score = 0
+    if _RUT_LABEL_RE.search(window):
+        score += 8   # label explícito de RUT
+    if _PERSONAL_CONTEXT_RE.search(window):
+        score += 3   # contexto personal (nombre, cliente, etc.)
+    return score
 
 
 def select_primary_rut(values: list[str]) -> str | None:
