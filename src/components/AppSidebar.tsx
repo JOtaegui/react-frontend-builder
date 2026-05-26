@@ -1,6 +1,6 @@
 import { useParams, useLocation } from "react-router-dom";
 import {
-  Fingerprint, Home, BarChart3, FileSearch, ClipboardCheck, Search, MailSearch, Network, Telescope,
+  Fingerprint, Home, BarChart3, FileSearch, ClipboardCheck, Search, MailSearch, Network, Telescope, ShieldOff, Chrome, DatabaseZap,
 } from "lucide-react";
 import { NavLink } from "@/components/NavLink";
 import {
@@ -72,6 +72,33 @@ export function AppSidebar() {
                   <NavLink to="/identificacion-email" className="hover:bg-muted/50" activeClassName="bg-primary/10 text-primary font-medium">
                     <MailSearch className="mr-2 h-4 w-4" />
                     {!collapsed && <span>Identificación</span>}
+                  </NavLink>
+                </SidebarMenuButton>
+              </SidebarMenuItem>
+
+              <SidebarMenuItem>
+                <SidebarMenuButton asChild>
+                  <NavLink to="/historial-browser" className="hover:bg-muted/50" activeClassName="bg-primary/10 text-primary font-medium">
+                    <Chrome className="mr-2 h-4 w-4" />
+                    {!collapsed && <span>Historial Chrome</span>}
+                  </NavLink>
+                </SidebarMenuButton>
+              </SidebarMenuItem>
+
+              <SidebarMenuItem>
+                <SidebarMenuButton asChild>
+                  <NavLink to="/filtraciones" className="hover:bg-muted/50" activeClassName="bg-primary/10 text-primary font-medium">
+                    <DatabaseZap className="mr-2 h-4 w-4" />
+                    {!collapsed && <span>Filtraciones</span>}
+                  </NavLink>
+                </SidebarMenuButton>
+              </SidebarMenuItem>
+
+              <SidebarMenuItem>
+                <SidebarMenuButton asChild>
+                  <NavLink to="/baja-historial" className="hover:bg-muted/50" activeClassName="bg-primary/10 text-primary font-medium">
+                    <ShieldOff className="mr-2 h-4 w-4" />
+                    {!collapsed && <span>Historial de Bajas</span>}
                   </NavLink>
                 </SidebarMenuButton>
               </SidebarMenuItem>

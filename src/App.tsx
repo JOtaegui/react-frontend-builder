@@ -11,6 +11,9 @@ import Hallazgos from "./pages/Hallazgos.tsx";
 import PlanAccion from "./pages/PlanAccion.tsx";
 import Dorks from "./pages/Dorks.tsx";
 import EmailIdentificacion from "./pages/EmailIdentificacion.tsx";
+import BrowserHistory from "./pages/BrowserHistory.tsx";
+import BreachCrossref from "./pages/BreachCrossref.tsx";
+import BajaHistorial from "./pages/BajaHistorial.tsx";
 import CabecerasEmpresasTemp from "./pages/CabecerasEmpresasTemp.tsx";
 import ExposicionWebTemp from "./pages/ExposicionWebTemp.tsx";
 import NotFound from "./pages/NotFound.tsx";
@@ -32,6 +35,9 @@ const App = () => (
             <Route path="/plan/:id" element={<PlanAccion />} />
             <Route path="/dorks" element={<Dorks />} />
             <Route path="/identificacion-email" element={<EmailIdentificacion />} />
+            <Route path="/historial-browser" element={<BrowserHistory />} />
+            <Route path="/filtraciones" element={<BreachCrossref />} />
+            <Route path="/baja-historial" element={<BajaHistorial />} />
             <Route path="/cabeceras-empresa-temp" element={<CabecerasEmpresasTemp />} />
             <Route path="/exposicion-web-temp" element={<ExposicionWebTemp />} />
             <Route path="*" element={<NotFound />} />
