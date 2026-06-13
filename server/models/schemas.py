@@ -227,6 +227,33 @@ class EmailIdentificationSummary(BaseModel):
     trash_domains: list[str] = []
 
 
+class ConsolidatedCandidate(BaseModel):
+    """Candidato alternativo en el cruce de datos entre remitentes."""
+    value: str
+    sources: int                            # dominios independientes que lo respaldan
+    score: float                            # proporción del puntaje ponderado (0.0–1.0)
+    supporting_companies: list[str] = []
+
+
+class ConsolidatedDataPoint(BaseModel):
+    value: str
+    sources: int        # dominios independientes que respaldan el valor
+    confidence: float   # 0.0–1.0 puntaje ponderado por confiabilidad de fuentes
+    confidence_level: Literal["alta", "media", "baja"] = "baja"
+    supporting_companies: list[str] = []    # empresas que confirman el valor
+    last_seen: Optional[str] = None         # último correo donde se observó
+    alternatives: list[ConsolidatedCandidate] = []
+
+
+class ConsolidatedUserProfile(BaseModel):
+    """Perfil del usuario inferido por cruce entre todos los remitentes."""
+    name: Optional[ConsolidatedDataPoint] = None
+    rut: Optional[ConsolidatedDataPoint] = None
+    address: Optional[ConsolidatedDataPoint] = None
+    phone: Optional[ConsolidatedDataPoint] = None
+    plate: Optional[ConsolidatedDataPoint] = None
+
+
 class EmailIdentificationResponse(BaseModel):
     provider: str
     email_address: Optional[str] = None
@@ -234,6 +261,7 @@ class EmailIdentificationResponse(BaseModel):
     senders: list[IdentifiedSender] = []
     analyzed_domains: list[str] = []
     baja_violations: list["BajaViolationFound"] = []
+    consolidated_profile: Optional[ConsolidatedUserProfile] = None
 
 
 # ── Contenedor de todas las fuentes ─────────────────────────────────────────

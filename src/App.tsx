@@ -16,6 +16,7 @@ import BreachCrossref from "./pages/BreachCrossref.tsx";
 import BajaHistorial from "./pages/BajaHistorial.tsx";
 import CabecerasEmpresasTemp from "./pages/CabecerasEmpresasTemp.tsx";
 import ExposicionWebTemp from "./pages/ExposicionWebTemp.tsx";
+import VistaConsolidada from "./pages/VistaConsolidada.tsx";
 import NotFound from "./pages/NotFound.tsx";
 
 const queryClient = new QueryClient();
@@ -40,6 +41,7 @@ const App = () => (
             <Route path="/baja-historial" element={<BajaHistorial />} />
             <Route path="/cabeceras-empresa-temp" element={<CabecerasEmpresasTemp />} />
             <Route path="/exposicion-web-temp" element={<ExposicionWebTemp />} />
+            <Route path="/consolidado" element={<VistaConsolidada />} />
             <Route path="*" element={<NotFound />} />
           </Routes>
         </BrowserRouter>

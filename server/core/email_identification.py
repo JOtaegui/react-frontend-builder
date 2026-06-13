@@ -15,6 +15,7 @@ from typing import Any, Iterable, Optional
 
 import httpx
 from config import EMAIL_EXTRACTION_PROVIDER, GEMINI_API_KEY, GEMINI_MODEL
+from core.consolidated_profile import build_consolidated_profile
 from core.ip_classification import enrich_senders_with_header_ip_country, extract_header_ips
 from core.personal_data.cross_validator import extract_contact_info
 from core.personal_data import (
@@ -204,6 +205,10 @@ class SenderAggregate:
     personal_address_evidence: list[str] = field(default_factory=list)
     personal_ruts: set[str] = field(default_factory=set)
     personal_phones: set[str] = field(default_factory=set)
+    # reincidencia (cuántos correos lo mencionan) y mejor score de contexto,
+    # ambos indexados por el teléfono ya normalizado (+56 X XXXX XXXX)
+    personal_phone_counts: dict[str, int] = field(default_factory=dict)
+    personal_phone_scores: dict[str, int] = field(default_factory=dict)
     personal_phone_evidence: list[str] = field(default_factory=list)
     personal_plates: set[str] = field(default_factory=set)
     personal_plate_evidence: list[str] = field(default_factory=list)
@@ -321,13 +326,37 @@ async def identify_email_footprint(
         summary=summary,
         senders=senders,
         analyzed_domains=sorted(all_domains),
+        consolidated_profile=build_consolidated_profile(senders, email_address=request.email_address),
     )
 
 
 async def _fetch_gmail_messages(access_token: str, max_messages: int) -> list[AuthorizedEmailMessage]:
-    headers = {"Authorization": f"Bearer {access_token}"}
-    timeout = httpx.Timeout(45.0, connect=10.0)
-    async with httpx.AsyncClient(timeout=timeout, headers=headers) as client:
+    """
+    Estrategia de dos fases optimizada para máxima detección de datos personales:
+
+    Fase 1 — Metadata rápida (sin cuerpo):
+      Descarga headers (From, Subject, Date…) para todos los mensajes.
+      Identifica todos los remitentes únicos. ~5-10× más rápido que format=full.
+
+    Fase 2 — Body completo por remitente:
+      Para CADA remitente único, descarga hasta FULL_PER_SENDER mensajes
+      con cuerpo completo. Esto maximiza la detección de RUT, nombre,
+      dirección, teléfono y patente en correos transaccionales.
+      Sin límite de remitentes — todos se cubren.
+    """
+    FULL_PER_SENDER = 5     # mensajes con body por cada remitente único
+    SEM_META        = 30    # concurrencia fase 1
+    SEM_FULL        = 20    # concurrencia fase 2
+
+    import re as _re
+    from collections import defaultdict
+
+    api_headers = {"Authorization": f"Bearer {access_token}"}
+    timeout_meta = httpx.Timeout(12.0, connect=6.0)
+    timeout_full = httpx.Timeout(20.0, connect=8.0)
+
+    # ── Fase 1: metadata para todos los mensajes ──────────────────────────────
+    async with httpx.AsyncClient(timeout=timeout_meta, headers=api_headers) as client:
         message_refs: list[dict[str, Any]] = []
         next_page_token: str | None = None
 
@@ -341,36 +370,126 @@ async def _fetch_gmail_messages(access_token: str, max_messages: int) -> list[Au
                 },
             )
             listing.raise_for_status()
-            payload = listing.json()
-            message_refs.extend(payload.get("messages", []) or [])
-            next_page_token = payload.get("nextPageToken")
+            data = listing.json()
+            message_refs.extend(data.get("messages", []) or [])
+            next_page_token = data.get("nextPageToken")
             if not next_page_token:
                 break
 
         selected_refs = message_refs[:max_messages]
-        semaphore = asyncio.Semaphore(12)
+        sem_meta = asyncio.Semaphore(SEM_META)
 
-        async def fetch_one(message_ref: dict[str, Any]) -> AuthorizedEmailMessage | None:
-            message_id = message_ref.get("id")
-            if not message_id:
-                return None
-            async with semaphore:
-                response = await client.get(
-                    f"{GMAIL_API_BASE}/messages/{message_id}",
-                    params={"format": "full"},
-                )
-                response.raise_for_status()
-                payload = response.json()
-                return _gmail_to_authorized_message(payload)
+        async def fetch_meta(ref: dict[str, Any]) -> tuple[str, AuthorizedEmailMessage | None]:
+            msg_id = ref.get("id", "")
+            if not msg_id:
+                return msg_id, None
+            async with sem_meta:
+                try:
+                    # metadataHeaders debe pasarse como lista para que httpx
+                    # los serialice como repeated params (?metadataHeaders=From&metadataHeaders=To…)
+                    r = await client.get(
+                        f"{GMAIL_API_BASE}/messages/{msg_id}",
+                        params=[
+                            ("format",          "metadata"),
+                            ("metadataHeaders", "From"),
+                            ("metadataHeaders", "To"),
+                            ("metadataHeaders", "Subject"),
+                            ("metadataHeaders", "Date"),
+                            ("metadataHeaders", "Reply-To"),
+                            ("metadataHeaders", "Return-Path"),
+                        ],
+                    )
+                    r.raise_for_status()
+                    return msg_id, _gmail_to_authorized_message(r.json())
+                except Exception:
+                    return msg_id, None
 
-        results = await asyncio.gather(*(fetch_one(ref) for ref in selected_refs), return_exceptions=True)
+        meta_results = await asyncio.gather(*(fetch_meta(ref) for ref in selected_refs))
 
-    messages: list[AuthorizedEmailMessage] = []
-    for result in results:
-        if isinstance(result, Exception) or result is None:
+    # Índice id → (mensaje_meta, posición_en_lista)
+    meta_by_id: dict[str, AuthorizedEmailMessage] = {}
+    order: list[str] = []
+    for msg_id, msg in meta_results:
+        order.append(msg_id)
+        if msg is not None:
+            meta_by_id[msg_id] = msg
+
+    # ── Agrupar IDs por dominio raíz del remitente ────────────────────────────
+    domain_to_ids: dict[str, list[str]] = defaultdict(list)
+    for msg_id, msg in meta_by_id.items():
+        from_hdr = next(
+            (h.value for h in msg.headers if h.name.lower() == "from"),
+            "",
+        )
+        m = _re.search(r"@([\w.-]+)", from_hdr)
+        if not m:
             continue
-        messages.append(result)
-    return messages
+        parts = m.group(1).lower().split(".")
+        domain = ".".join(parts[-2:]) if len(parts) >= 2 else parts[0]
+        domain_to_ids[domain].append(msg_id)
+
+    # ── Fase 2: body completo — FULL_PER_SENDER mensajes por cada remitente ──
+    # Todos los remitentes cubiertos. Priorizamos los que tienen subjects con
+    # palabras transaccionales (pedido, boleta, cuenta, rut…) porque es donde
+    # más probablemente aparecen datos personales como RUT, dirección, teléfono.
+    TRANSACTIONAL_HINTS = {
+        "pedido", "orden", "boleta", "factura", "compra", "confirmacion",
+        "despacho", "envio", "entrega", "cuenta", "saldo", "transferencia",
+        "rut", "direccion", "domicilio", "clave", "bienvenido", "registro",
+        "pago", "cobro", "cuota", "vencimiento", "estado de cuenta",
+    }
+
+    def _sender_priority(ids: list[str]) -> int:
+        """Retorna 0 si algún subject tiene hint transaccional, 1 si no."""
+        for mid in ids[:3]:
+            msg = meta_by_id.get(mid)
+            if not msg:
+                continue
+            subj = (msg.subject or "").lower()
+            if any(h in subj for h in TRANSACTIONAL_HINTS):
+                return 0
+        return 1
+
+    sorted_domains = sorted(
+        domain_to_ids.items(),
+        key=lambda kv: (_sender_priority(kv[1]), -len(kv[1])),
+    )
+
+    full_ids: list[str] = []
+    for _domain, ids in sorted_domains:
+        full_ids.extend(ids[:FULL_PER_SENDER])
+
+    full_by_id: dict[str, AuthorizedEmailMessage] = {}
+    if full_ids:
+        async with httpx.AsyncClient(timeout=timeout_full, headers=api_headers) as client:
+            sem_full = asyncio.Semaphore(SEM_FULL)
+
+            async def fetch_full(msg_id: str) -> tuple[str, AuthorizedEmailMessage | None]:
+                async with sem_full:
+                    try:
+                        r = await client.get(
+                            f"{GMAIL_API_BASE}/messages/{msg_id}",
+                            params={"format": "full"},
+                        )
+                        r.raise_for_status()
+                        return msg_id, _gmail_to_authorized_message(r.json())
+                    except Exception:
+                        return msg_id, None
+
+            full_results = await asyncio.gather(*(fetch_full(mid) for mid in full_ids))
+
+        for msg_id, msg in full_results:
+            if msg is not None:
+                full_by_id[msg_id] = msg
+
+    # ── Combinar: usar version full si existe, si no usar metadata ────────────
+    messages_final: list[AuthorizedEmailMessage] = []
+    for msg_id in order:
+        msg = full_by_id.get(msg_id) or meta_by_id.get(msg_id)
+        if msg is not None:
+            messages_final.append(msg)
+
+    return messages_final
 
 
 async def _enrich_with_whois(aggregates: dict[str, SenderAggregate]) -> None:
@@ -876,6 +995,7 @@ def _parse_message(message: AuthorizedEmailMessage, search_targets: Optional[Ema
     personal_address_scores = {match.address: match.score for match in address_matches}
     personal_address_evidence = [match.evidence for match in address_matches]
     personal_phones = [match.phone for match in phone_matches]
+    personal_phone_scores = {match.phone: match.score for match in phone_matches}
     personal_phone_evidence = [match.evidence for match in phone_matches]
     personal_ruts = extract_chilean_ruts(analysis_content)
     personal_plates = [match.plate for match in plate_matches]
@@ -887,6 +1007,8 @@ def _parse_message(message: AuthorizedEmailMessage, search_targets: Optional[Ema
             personal_address_scores[contact_info.address] = max(personal_address_scores.get(contact_info.address, 0), 5)
         if contact_info.phone and contact_info.phone not in personal_phones:
             personal_phones.insert(0, contact_info.phone)
+        if contact_info.phone:
+            personal_phone_scores[contact_info.phone] = max(personal_phone_scores.get(contact_info.phone, 0), 5)
 
         details = contact_info.details if isinstance(contact_info.details, dict) else {}
         cv_address_candidates = details.get("address_candidates", []) if isinstance(details, dict) else []
@@ -928,6 +1050,10 @@ def _parse_message(message: AuthorizedEmailMessage, search_targets: Optional[Ema
             phone = str(candidate.get("phone") or "").strip()
             if phone and phone not in personal_phones:
                 personal_phones.append(phone)
+            if phone:
+                score = candidate.get("score")
+                if isinstance(score, (int, float)):
+                    personal_phone_scores[phone] = max(int(score), personal_phone_scores.get(phone, 0))
             evidence = str(candidate.get("evidence") or "").strip()
             if evidence and evidence not in personal_phone_evidence and len(personal_phone_evidence) < 8:
                 personal_phone_evidence.append(evidence)
@@ -1012,6 +1138,8 @@ def _parse_message(message: AuthorizedEmailMessage, search_targets: Optional[Ema
             if matched_phones or has_phone_in_full:
                 phone_to_add = _normalize_phone(target_telefono) or target_telefono
                 personal_phones = _dedupe_preserve_order([phone_to_add, *matched_phones, *personal_phones])
+                # el teléfono objetivo confirmado es la señal más fuerte posible
+                personal_phone_scores[phone_to_add] = max(personal_phone_scores.get(phone_to_add, 0), 12)
                 ev_phone = "[target] Telefono objetivo encontrado en el correo"
                 if ev_phone not in personal_phone_evidence:
                     personal_phone_evidence.insert(0, ev_phone)
@@ -1064,6 +1192,7 @@ def _parse_message(message: AuthorizedEmailMessage, search_targets: Optional[Ema
         "personal_address_evidence": personal_address_evidence,
         "personal_ruts": personal_ruts,
         "personal_phones": personal_phones,
+        "personal_phone_scores": personal_phone_scores,
         "personal_phone_evidence": personal_phone_evidence,
         "personal_plates": personal_plates,
         "personal_plate_evidence": personal_plate_evidence,
@@ -1109,6 +1238,12 @@ def _merge_message(record: SenderAggregate, parsed: dict[str, Any]) -> None:
             record.personal_address_evidence.append(evidence)
     record.personal_ruts.update(parsed["personal_ruts"])
     record.personal_phones.update(parsed["personal_phones"])
+    # reincidencia: cada correo que menciona un teléfono suma una aparición;
+    # el score de contexto se queda con el máximo observado para ese número
+    for phone in parsed["personal_phones"]:
+        record.personal_phone_counts[phone] = record.personal_phone_counts.get(phone, 0) + 1
+    for phone, score in parsed.get("personal_phone_scores", {}).items():
+        record.personal_phone_scores[phone] = max(int(score), record.personal_phone_scores.get(phone, 0))
     for evidence in parsed["personal_phone_evidence"]:
         if evidence not in record.personal_phone_evidence and len(record.personal_phone_evidence) < 5:
             record.personal_phone_evidence.append(evidence)
@@ -1282,7 +1417,11 @@ def _to_identified_sender(sender: SenderAggregate) -> IdentifiedSender:
         personal_ruts=sorted(sender.personal_ruts),
         primary_personal_rut=select_primary_rut(sorted(sender.personal_ruts)),
         personal_phones=sorted(sender.personal_phones),
-        primary_personal_phone=select_primary_phone(sorted(sender.personal_phones)),
+        primary_personal_phone=select_primary_phone(
+            sorted(sender.personal_phones),
+            counts=sender.personal_phone_counts,
+            scores=sender.personal_phone_scores,
+        ),
         personal_phone_evidence=sender.personal_phone_evidence,
         personal_plates=sorted(sender.personal_plates),
         primary_personal_plate=select_primary_plate(sorted(sender.personal_plates)),

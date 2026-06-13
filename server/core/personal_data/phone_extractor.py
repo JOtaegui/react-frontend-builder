@@ -240,11 +240,31 @@ def extract_chilean_phone_matches_with_context(
     return found[:5]
 
 
-def select_primary_phone(values: list[str]) -> str | None:
-    """Elige el teléfono más relevante de una lista."""
+def select_primary_phone(
+    values: list[str],
+    counts: dict[str, int] | None = None,
+    scores: dict[str, int] | None = None,
+) -> str | None:
+    """Elige el teléfono más relevante de una lista.
+
+    Si se entregan `counts` (reincidencia: cuántos correos lo mencionan) y/o
+    `scores` (contexto: etiqueta "tu teléfono", despacho, validación cruzada),
+    estos mandan sobre el formato. El contexto pesa más que la repetición: un
+    número con etiqueta explícita gana aunque aparezca pocas veces, mientras que
+    un call-center repetido en la firma no debe imponerse por volumen.
+    """
     if not values:
         return None
-    return min(values, key=lambda v: (_phone_priority(v), v))
+    if not counts and not scores:
+        return min(values, key=lambda v: (_phone_priority(v), v))
+
+    def rank(v: str) -> tuple:
+        score = scores.get(v, 0) if scores else 0
+        count = counts.get(v, 0) if counts else 0
+        # menor es mejor: más score, más reincidencia (capada), mejor formato
+        return (-score * 3 - min(count, 3) * 2, _phone_priority(v), v)
+
+    return min(values, key=rank)
 
 
 # ---------------------------------------------------------------------------

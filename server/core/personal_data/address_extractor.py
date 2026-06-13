@@ -673,7 +673,12 @@ def select_primary_address(
         # Bonus por nombre de comuna conocida
         if _find_commune_in_text(nv):
             completeness += 2
-        rank = count * 7 + score * 2 + completeness
+        # El contexto (score: etiquetas como "dirección de envío") pesa más que
+        # la repetición: una dirección que aparece en decenas de correos del
+        # mismo remitente suele ser el pie de página corporativo, mientras que
+        # la dirección real del usuario aparece pocas veces pero con etiqueta
+        # explícita. El conteo se capea para que el footer no gane por volumen.
+        rank = min(count, 3) * 4 + score * 3 + completeness
         if rank > best_rank or (rank == best_rank and len(value) > len(best)):
             best = value
             best_rank = rank

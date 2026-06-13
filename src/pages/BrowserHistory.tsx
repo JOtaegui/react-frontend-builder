@@ -124,7 +124,9 @@ export default function BrowserHistory() {
         const body = await res.json().catch(() => ({ detail: res.statusText }));
         throw new Error(body.detail ?? `Error ${res.status}`);
       }
-      setResult(await res.json());
+      const data = await res.json();
+      setResult(data);
+      try { localStorage.setItem("browser_history_result", JSON.stringify(data)); } catch {}
     } catch (err) {
       setError(err instanceof Error ? err.message : "Error desconocido");
     } finally {

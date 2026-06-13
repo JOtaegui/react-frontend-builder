@@ -5,6 +5,11 @@ import re
 NAME_PATTERNS = [
     r"\b(?:Estimado|Estimada|Hola|Dear|Sr\.?|Sra\.?|Señor|Señora)\s+([A-ZÁÉÍÓÚÑ][a-záéíóúñ]{1,24}(?:\s+[A-ZÁÉÍÓÚÑ][a-záéíóúñ]{1,24}){1,2})",
     r"\b(?:Titular|Cliente|Usuario|Beneficiario)\s*:\s*([A-ZÁÉÍÓÚÑ][a-záéíóúñ]{1,24}(?:\s+[A-ZÁÉÍÓÚÑ][a-záéíóúñ]{1,24}){1,2})",
+    # Nombres EN MAYÚSCULAS ("Hola JUAN PABLO OTAEGUI,"), comunes en correos
+    # transaccionales. Se exige puntuación o fin de línea después del nombre
+    # para no capturar frases promocionales escritas en mayúsculas.
+    r"\b(?:Estimado|Estimada|Hola|Dear|ESTIMADO|ESTIMADA|HOLA|DEAR|Señor|Señora|SEÑOR|SEÑORA)[ \t]+([A-ZÁÉÍÓÚÑ]{2,24}(?:[ \t]+[A-ZÁÉÍÓÚÑ]{2,24}){1,2})(?=[ \t]*(?:[,.;:!\n]|$))",
+    r"\b(?:Titular|Cliente|Usuario|Beneficiario|TITULAR|CLIENTE|USUARIO|BENEFICIARIO)[ \t]*:[ \t]*([A-ZÁÉÍÓÚÑ]{2,24}(?:[ \t]+[A-ZÁÉÍÓÚÑ]{2,24}){1,2})(?=[ \t]*(?:[,.;:!\n]|$))",
 ]
 
 NAME_STOPWORDS = {
@@ -48,7 +53,8 @@ def extract_name_candidates(content: str) -> list[str]:
     for pattern in NAME_PATTERNS:
         for match in re.findall(pattern, content):
             cleaned = re.sub(r"\s+", " ", match).strip(" ,.;:-")
-            parts = cleaned.split()
+            # nombres en MAYÚSCULAS se llevan a formato título antes de validar
+            parts = [part.capitalize() if part.isupper() else part for part in cleaned.split()]
             while parts and parts[-1] in NAME_BANNED_TOKENS:
                 parts = parts[:-1]
             if len(parts) < 2:

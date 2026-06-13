@@ -244,7 +244,22 @@ export default function BreachCrossref() {
         const body = await res.json().catch(() => ({ detail: res.statusText }));
         throw new Error(body.detail ?? `Error ${res.status}`);
       }
-      setResult(await res.json());
+      const data: CrossrefResponse = await res.json();
+      setResult(data);
+      // Persistir resultados para Vista Consolidada
+      try {
+        const cachePayload: Record<string, { hasBreached: boolean; hibpBreach: boolean; clBreach: boolean; breachNames: string[] }> = {};
+        for (const c of data.companies) {
+          const domain = c.domain.toLowerCase().replace(/^www\./, "");
+          cachePayload[domain] = {
+            hasBreached:  c.has_breach,
+            hibpBreach:   c.hibp_breaches.some(b => b.source !== "scraped_cl"),
+            clBreach:     c.hibp_breaches.some(b => b.source === "scraped_cl"),
+            breachNames:  c.hibp_breaches.map(b => b.name),
+          };
+        }
+        localStorage.setItem("consolidated_hibp_result", JSON.stringify({ ts: Date.now(), breaches: cachePayload }));
+      } catch { /* ignore storage errors */ }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Error desconocido");
     } finally {

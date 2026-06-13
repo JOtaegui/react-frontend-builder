@@ -20,9 +20,35 @@ type SearchTargets = {
   patente: string;
 };
 
+interface ConsolidatedCandidate {
+  value: string;
+  sources: number;
+  score: number;
+  supporting_companies: string[];
+}
+
+interface ConsolidatedDataPoint {
+  value: string;
+  sources: number;
+  confidence: number;
+  confidence_level: "alta" | "media" | "baja";
+  supporting_companies: string[];
+  last_seen?: string | null;
+  alternatives: ConsolidatedCandidate[];
+}
+
+interface ConsolidatedUserProfile {
+  name?: ConsolidatedDataPoint | null;
+  rut?: ConsolidatedDataPoint | null;
+  address?: ConsolidatedDataPoint | null;
+  phone?: ConsolidatedDataPoint | null;
+  plate?: ConsolidatedDataPoint | null;
+}
+
 interface EmailIdentificationResponse {
   provider: string;
   email_address?: string | null;
+  consolidated_profile?: ConsolidatedUserProfile | null;
   summary: {
     total_messages_analyzed: number;
     spam_messages_analyzed: number;
@@ -295,6 +321,21 @@ function confidenceLabel(value: number) {
   return "Baja";
 }
 
+const CONFIDENCE_LEVEL_STYLES: Record<ConsolidatedDataPoint["confidence_level"], string> = {
+  alta: "border-emerald-500/40 bg-emerald-500/15 text-emerald-700 dark:text-emerald-300",
+  media: "border-amber-500/40 bg-amber-500/15 text-amber-700 dark:text-amber-300",
+  baja: "border-rose-500/40 bg-rose-500/15 text-rose-700 dark:text-rose-300",
+};
+
+function SignalConfidenceBadge({ point }: { point?: ConsolidatedDataPoint | null }) {
+  if (!point) return null;
+  return (
+    <Badge variant="outline" className={`mt-2 w-fit capitalize ${CONFIDENCE_LEVEL_STYLES[point.confidence_level]}`}>
+      Confianza {point.confidence_level} ({Math.round(point.confidence * 100)}%)
+    </Badge>
+  );
+}
+
 function summarizeList(values: Array<string | null | undefined>, fallback: string, limit = 8) {
   const cleaned = values
     .map((value) => (value ?? "").trim())
@@ -512,7 +553,7 @@ export default function EmailIdentificacion() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
-        signal: AbortSignal.timeout(240_000),
+        signal: AbortSignal.timeout(600_000),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.detail ?? `HTTP ${res.status}`);
@@ -540,6 +581,8 @@ export default function EmailIdentificacion() {
           }));
 
         const domains = senders.map(s => s.primary_domain);
+        localStorage.setItem("email_footprint_result", JSON.stringify(data));
+        localStorage.setItem("email_footprint_holder", data.email_address ?? emailAddress ?? "");
         if (domains.length > 0) {
           localStorage.setItem("email_crossref_domains", JSON.stringify(domains));
           localStorage.setItem("email_crossref_senders", JSON.stringify(senders));
@@ -609,27 +652,41 @@ export default function EmailIdentificacion() {
       ? sendersWithPersonalData.reduce((acc, sender) => acc + (sender.personal_data_confidence ?? 0), 0) / sendersWithPersonalData.length
       : 0;
 
+    // Perfil consolidado del backend: cruce ponderado por confiabilidad de
+    // cada empresa. Cuando existe, manda sobre el conteo local.
+    const profile = result?.consolidated_profile ?? null;
+    const fromProfile = (point?: ConsolidatedDataPoint | null) =>
+      point ? { value: point.value as string | null, count: point.sources, consolidated: point } : null;
+
     // If user explicitly provided their address as a search target and it was found,
     // use their input as the canonical address value (not the most frequent extracted variant)
     const userAddressTarget = searchTargets.direccion.trim();
     const addressSignal = (userAddressTarget && direccionMatchedSenders.length > 0)
-      ? { value: userAddressTarget, count: direccionMatchedSenders.length }
-      : mostFrequentValue(addresses);
+      ? { value: userAddressTarget as string | null, count: direccionMatchedSenders.length, consolidated: profile?.address ?? null }
+      : fromProfile(profile?.address) ?? { ...mostFrequentValue(addresses), consolidated: null };
 
     return {
-      name: mostProbableName(names),
+      name: fromProfile(profile?.name) ?? { ...mostProbableName(names), consolidated: null },
       address: addressSignal,
-      rut: mostFrequentValue(ruts),
-      phone: mostProbableStructuredValue(phones, "phone"),
-      plate: mostProbableStructuredValue(plates, "plate"),
+      rut: fromProfile(profile?.rut) ?? { ...mostFrequentValue(ruts), consolidated: null },
+      phone: fromProfile(profile?.phone) ?? { ...mostProbableStructuredValue(phones, "phone"), consolidated: null },
+      plate: fromProfile(profile?.plate) ?? { ...mostProbableStructuredValue(plates, "plate"), consolidated: null },
       avgConfidence,
     };
   }, [result, sendersWithPersonalData, searchTargets.direccion]);
   const probableName = summarySignals.name.value;
   const summaryEvidence = useMemo(() => {
+    // El backend puede canonicalizar el valor ("+56 9 1234 5678" vs "912345678"),
+    // así que además del match exacto aceptamos a las empresas que respaldan
+    // el candidato según el perfil consolidado.
+    const supports = (point: ConsolidatedDataPoint | null | undefined, sender: EmailSender) =>
+      (point?.supporting_companies ?? []).includes(sender.company_name);
     return {
       name: (result?.senders ?? [])
-        .filter((sender) => probableName && matchedNameVariants(sender, probableName).length > 0)
+        .filter((sender) =>
+          (probableName && matchedNameVariants(sender, probableName).length > 0) ||
+          supports(summarySignals.name.consolidated, sender),
+        )
         .map((sender) => ({
           company: sender.company_name,
           domain: sender.primary_domain,
@@ -645,7 +702,8 @@ export default function EmailIdentificacion() {
           // Match by exact address string (traditional extraction path)
           (summarySignals.address.value && (sender.personal_addresses ?? []).includes(summarySignals.address.value)) ||
           // OR: backend confirmed this sender has the user's target address (any variant)
-          (sender.matched_targets ?? []).includes("direccion"),
+          (sender.matched_targets ?? []).includes("direccion") ||
+          supports(summarySignals.address.consolidated, sender),
         )
         .map((sender) => ({
           company: sender.company_name,
@@ -661,7 +719,10 @@ export default function EmailIdentificacion() {
             : ["Detectado en el contenido analizado del correo."],
         })),
       rut: (result?.senders ?? [])
-        .filter((sender) => summarySignals.rut.value && (sender.personal_ruts ?? []).includes(summarySignals.rut.value))
+        .filter((sender) =>
+          (summarySignals.rut.value && (sender.personal_ruts ?? []).includes(summarySignals.rut.value)) ||
+          supports(summarySignals.rut.consolidated, sender),
+        )
         .map((sender) => ({
           company: sender.company_name,
           domain: sender.primary_domain,
@@ -673,7 +734,10 @@ export default function EmailIdentificacion() {
           evidence: ["Detectado en el contenido analizado del correo."],
         })),
       phone: (result?.senders ?? [])
-        .filter((sender) => summarySignals.phone.value && (sender.personal_phones ?? []).includes(summarySignals.phone.value))
+        .filter((sender) =>
+          (summarySignals.phone.value && (sender.personal_phones ?? []).includes(summarySignals.phone.value)) ||
+          supports(summarySignals.phone.consolidated, sender),
+        )
         .map((sender) => ({
           company: sender.company_name,
           domain: sender.primary_domain,
@@ -687,7 +751,10 @@ export default function EmailIdentificacion() {
             : ["Detectado en el contenido analizado del correo."],
         })),
       plate: (result?.senders ?? [])
-        .filter((sender) => summarySignals.plate.value && (sender.personal_plates ?? []).includes(summarySignals.plate.value))
+        .filter((sender) =>
+          (summarySignals.plate.value && (sender.personal_plates ?? []).includes(summarySignals.plate.value)) ||
+          supports(summarySignals.plate.consolidated, sender),
+        )
         .map((sender) => ({
           company: sender.company_name,
           domain: sender.primary_domain,
@@ -699,7 +766,7 @@ export default function EmailIdentificacion() {
           evidence: (sender.personal_plate_evidence ?? []).slice(0, 3),
         })),
     };
-  }, [probableName, result, summarySignals.address.value, summarySignals.phone.value, summarySignals.plate.value, summarySignals.rut.value, searchTargets.direccion]);
+  }, [probableName, result, summarySignals]);
 
   useEffect(() => {
     setSelectedSummarySignal(availableSummarySignal(summarySignals));
@@ -1413,8 +1480,9 @@ export default function EmailIdentificacion() {
                         <div className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">Nombre más probable</div>
                         <div className="mt-3 text-2xl font-semibold">{summarySignals.name.value ?? "Sin confirmar"}</div>
                         <div className="mt-2 text-sm text-muted-foreground">
-                          Detectado en {summarySignals.name.count} coincidencia{summarySignals.name.count === 1 ? "" : "s"}.
+                          {summarySignals.name.value ? `Respaldado por ${summarySignals.name.count} fuente${summarySignals.name.count === 1 ? "" : "s"} independiente${summarySignals.name.count === 1 ? "" : "s"}.` : "No hubo un nombre validado suficiente."}
                         </div>
+                        <SignalConfidenceBadge point={summarySignals.name.consolidated} />
                       </button>
 
                       <button
@@ -1425,8 +1493,9 @@ export default function EmailIdentificacion() {
                         <div className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">Direccion más probable</div>
                         <div className="mt-3 text-2xl font-semibold">{summarySignals.address.value ?? "Sin confirmar"}</div>
                         <div className="mt-2 text-sm text-muted-foreground">
-                          {summarySignals.address.value ? `Detectada en ${summarySignals.address.count} coincidencia${summarySignals.address.count === 1 ? "" : "s"}.` : "No hubo una direccion validada suficiente."}
+                          {summarySignals.address.value ? `Respaldada por ${summarySignals.address.count} fuente${summarySignals.address.count === 1 ? "" : "s"} independiente${summarySignals.address.count === 1 ? "" : "s"}.` : "No hubo una direccion validada suficiente."}
                         </div>
+                        <SignalConfidenceBadge point={summarySignals.address.consolidated} />
                       </button>
 
                       <button
@@ -1437,8 +1506,9 @@ export default function EmailIdentificacion() {
                         <div className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">RUT más probable</div>
                         <div className="mt-3 text-2xl font-semibold">{summarySignals.rut.value ?? "Sin confirmar"}</div>
                         <div className="mt-2 text-sm text-muted-foreground">
-                          {summarySignals.rut.value ? `Detectado en ${summarySignals.rut.count} coincidencia${summarySignals.rut.count === 1 ? "" : "s"}.` : "No hubo un RUT validado suficiente."}
+                          {summarySignals.rut.value ? `Respaldado por ${summarySignals.rut.count} fuente${summarySignals.rut.count === 1 ? "" : "s"} independiente${summarySignals.rut.count === 1 ? "" : "s"}.` : "No hubo un RUT validado suficiente."}
                         </div>
+                        <SignalConfidenceBadge point={summarySignals.rut.consolidated} />
                       </button>
 
                       <button
@@ -1449,8 +1519,9 @@ export default function EmailIdentificacion() {
                         <div className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">Telefono más probable</div>
                         <div className="mt-3 text-2xl font-semibold">{summarySignals.phone.value ?? "Sin confirmar"}</div>
                         <div className="mt-2 text-sm text-muted-foreground">
-                          {summarySignals.phone.value ? `Detectado en ${summarySignals.phone.count} coincidencia${summarySignals.phone.count === 1 ? "" : "s"}.` : "No hubo un telefono validado suficiente."}
+                          {summarySignals.phone.value ? `Respaldado por ${summarySignals.phone.count} fuente${summarySignals.phone.count === 1 ? "" : "s"} independiente${summarySignals.phone.count === 1 ? "" : "s"}.` : "No hubo un telefono validado suficiente."}
                         </div>
+                        <SignalConfidenceBadge point={summarySignals.phone.consolidated} />
                       </button>
 
                       <button
@@ -1461,8 +1532,9 @@ export default function EmailIdentificacion() {
                         <div className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">Patente más probable</div>
                         <div className="mt-3 text-2xl font-semibold">{summarySignals.plate.value ?? "Sin confirmar"}</div>
                         <div className="mt-2 text-sm text-muted-foreground">
-                          {summarySignals.plate.value ? `Detectada en ${summarySignals.plate.count} coincidencia${summarySignals.plate.count === 1 ? "" : "s"}.` : "No hubo una patente con contexto suficiente."}
+                          {summarySignals.plate.value ? `Respaldada por ${summarySignals.plate.count} fuente${summarySignals.plate.count === 1 ? "" : "s"} independiente${summarySignals.plate.count === 1 ? "" : "s"}.` : "No hubo una patente con contexto suficiente."}
                         </div>
+                        <SignalConfidenceBadge point={summarySignals.plate.consolidated} />
                       </button>
                     </div>
 
@@ -1482,6 +1554,29 @@ export default function EmailIdentificacion() {
                           {selectedSummarySignal === "name" ? "Nombre" : selectedSummarySignal === "address" ? "Direccion" : selectedSummarySignal === "rut" ? "RUT" : selectedSummarySignal === "phone" ? "Telefono" : "Patente"}
                         </Badge>
                       </div>
+
+                      {summarySignals[selectedSummarySignal].consolidated && (
+                        <div className="mt-4 space-y-3">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <span className="text-xs uppercase tracking-[0.18em] text-muted-foreground">Verificado cruzadamente en</span>
+                            {summarySignals[selectedSummarySignal].consolidated!.supporting_companies.map((company) => (
+                              <Badge key={company} variant="secondary" className="bg-emerald-500/15 text-emerald-700 dark:text-emerald-300">
+                                {company}
+                              </Badge>
+                            ))}
+                          </div>
+                          {summarySignals[selectedSummarySignal].consolidated!.alternatives.length > 0 && (
+                            <div className="flex flex-wrap items-center gap-2">
+                              <span className="text-xs uppercase tracking-[0.18em] text-muted-foreground">Otros candidatos descartados</span>
+                              {summarySignals[selectedSummarySignal].consolidated!.alternatives.map((alternative) => (
+                                <Badge key={alternative.value} variant="outline" className="border-muted-foreground/30 text-muted-foreground">
+                                  {alternative.value} · {alternative.sources} fuente{alternative.sources === 1 ? "" : "s"} ({Math.round(alternative.score * 100)}%)
+                                </Badge>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      )}
 
                       <div className="mt-4 space-y-3">
                         {(selectedSummarySignal === "name" ? summaryEvidence.name : selectedSummarySignal === "address" ? summaryEvidence.address : selectedSummarySignal === "rut" ? summaryEvidence.rut : selectedSummarySignal === "phone" ? summaryEvidence.phone : summaryEvidence.plate).length > 0 ? (
