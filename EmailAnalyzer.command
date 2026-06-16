@@ -3,10 +3,14 @@
 # Doble clic en Finder para arrancar. Abre el servidor y el browser.
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "$0")" && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SERVER="$ROOT/server"
 VENV="$SERVER/venv"
 PORT=8787
+
+# Matar cualquier proceso anterior en el mismo puerto
+lsof -ti ":$PORT" | xargs kill -9 2>/dev/null || true
+sleep 0.5
 
 # ── Cargar .env del usuario ───────────────────────────────────────────────────
 CONFIG_DIR="$HOME/.emailanalyzer"
@@ -38,9 +42,25 @@ export STATIC_DIST_PATH="$ROOT/dist"
 export FRONTEND_URL="http://localhost:$PORT"
 export GOOGLE_OAUTH_REDIRECT_URI="http://localhost:$PORT/api/auth/gmail/callback"
 
-# ── Construir frontend si no existe ──────────────────────────────────────────
+# ── Crear entorno virtual e instalar dependencias (solo la primera vez) ───────
+if [ ! -x "$VENV/bin/python3" ]; then
+    echo ">>> Primera vez: creando entorno virtual e instalando dependencias..."
+    echo "    (esto puede tardar algunos minutos)"
+    python3 -m venv "$VENV"
+    "$VENV/bin/python3" -m pip install --upgrade pip
+    "$VENV/bin/python3" -m pip install -r "$SERVER/requirements.txt"
+fi
+
+# ── Construir frontend si no existe o hay cambios en src/ ────────────────────
+NEEDS_BUILD=false
 if [ ! -d "$ROOT/dist" ]; then
-    echo ">>> Construyendo frontend (solo la primera vez)..."
+    NEEDS_BUILD=true
+elif [ -d "$ROOT/src" ] && [ "$(find "$ROOT/src" -newer "$ROOT/dist/index.html" -name '*.tsx' -o -name '*.ts' 2>/dev/null | head -1)" != "" ]; then
+    NEEDS_BUILD=true
+fi
+
+if [ "$NEEDS_BUILD" = "true" ]; then
+    echo ">>> Construyendo frontend..."
     cd "$ROOT"
     npm run build
 fi
