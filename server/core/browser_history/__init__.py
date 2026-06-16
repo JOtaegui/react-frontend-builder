@@ -40,14 +40,18 @@ def _run_full_analysis(reader: BaseHistoryReader, limit: int) -> dict:
     Sincrónico — se ejecuta en thread pool.
     Lee historial + Login Data + autofill y devuelve resultado completo.
     """
+    # Web Data y Login Data viven en la carpeta de perfil del navegador Chromium
+    # seleccionado (None para Firefox/Safari → autofill/login no aplican).
+    profile_dir = reader.chromium_profile_dir()
+
     try:
-        autofill = read_chrome_autofill()
+        autofill = read_chrome_autofill(profile_dir)
     except Exception as exc:
         logger.warning("[autofill] No se pudo leer Web Data: %s", exc)
         autofill = AutofillSnapshot(disponible=False)
 
     try:
-        login_data = read_chrome_login_data()
+        login_data = read_chrome_login_data(profile_dir)
     except Exception as exc:
         logger.warning("[login-data] No se pudo leer Login Data: %s", exc)
         login_data = LoginDataSnapshot(disponible=False)

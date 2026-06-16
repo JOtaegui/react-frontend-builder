@@ -13,17 +13,14 @@ from __future__ import annotations
 
 import shutil
 import sqlite3
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 from urllib.parse import urlparse
 
-LOGIN_DATA_PATH = (
-    Path.home()
-    / "Library" / "Application Support"
-    / "Google" / "Chrome" / "Default" / "Login Data"
-)
-LOGIN_DATA_TMP = Path("/tmp/chrome_logindata_osint_tmp.db")
+# Copia temporal multiplataforma (en Windows /tmp no existe).
+LOGIN_DATA_TMP = Path(tempfile.gettempdir()) / "osint_logindata_tmp.db"
 
 # Época Chrome en microsegundos (1601-01-01)
 _CHROME_EPOCH_US = 11_644_473_600_000_000
@@ -84,17 +81,34 @@ def _root_domain(url: str) -> Optional[str]:
         return None
 
 
-def read_chrome_login_data() -> LoginDataSnapshot:
+def _resolve_login_data_path(profile_dir: Optional[Path]) -> Optional[Path]:
+    """'Login Data' vive en la carpeta de perfil del navegador Chromium. Si no se
+    entrega un perfil, cae al perfil por defecto de Chrome del SO actual."""
+    if profile_dir is None:
+        try:
+            from ._readers import get_reader
+            profile_dir = get_reader("chrome").chromium_profile_dir()
+        except Exception:
+            profile_dir = None
+    if profile_dir is None:
+        return None
+    return profile_dir / "Login Data"
+
+
+def read_chrome_login_data(profile_dir: Optional[Path] = None) -> LoginDataSnapshot:
     """
-    Lee Login Data de Chrome y devuelve un LoginDataSnapshot.
+    Lee 'Login Data' del navegador Chromium indicado por `profile_dir` (Chrome,
+    Brave, Edge…) y devuelve un LoginDataSnapshot. Funciona en macOS y Windows.
+    Solo se lee username_value (texto plano); las contraseñas nunca se leen.
 
     Si el archivo no existe o falla, devuelve snapshot vacío (disponible=False).
     """
-    if not LOGIN_DATA_PATH.exists():
+    login_path = _resolve_login_data_path(profile_dir)
+    if login_path is None or not login_path.exists():
         return LoginDataSnapshot(disponible=False)
 
     try:
-        shutil.copy2(str(LOGIN_DATA_PATH), str(LOGIN_DATA_TMP))
+        shutil.copy2(str(login_path), str(LOGIN_DATA_TMP))
     except Exception:
         return LoginDataSnapshot(disponible=False)
 

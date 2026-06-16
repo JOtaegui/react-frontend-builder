@@ -11,7 +11,7 @@ import unicodedata
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from html import unescape
-from typing import Any, Iterable, Optional
+from typing import Any, Callable, Iterable, Optional
 
 import httpx
 from config import EMAIL_EXTRACTION_PROVIDER, GEMINI_API_KEY, GEMINI_MODEL
@@ -243,6 +243,7 @@ class SenderAggregate:
 
 async def identify_email_footprint(
     request: EmailIdentificationRequest,
+    progress_cb: Optional[Callable[[int, int], None]] = None,
 ) -> EmailIdentificationResponse:
     messages = list(request.messages)
     if request.provider == "gmail":
@@ -251,6 +252,7 @@ async def identify_email_footprint(
         messages = await _fetch_gmail_messages(
             access_token=request.gmail_access_token,
             max_messages=request.max_messages,
+            progress_cb=progress_cb,
         )
     elif not messages:
         raise ValueError("Debes enviar mensajes autorizados para provider='manual'")
@@ -326,11 +328,19 @@ async def identify_email_footprint(
         summary=summary,
         senders=senders,
         analyzed_domains=sorted(all_domains),
-        consolidated_profile=build_consolidated_profile(senders, email_address=request.email_address),
+        consolidated_profile=build_consolidated_profile(
+            senders,
+            email_address=request.email_address,
+            search_targets=request.search_targets,
+        ),
     )
 
 
-async def _fetch_gmail_messages(access_token: str, max_messages: int) -> list[AuthorizedEmailMessage]:
+async def _fetch_gmail_messages(
+    access_token: str,
+    max_messages: int,
+    progress_cb: Optional[Callable[[int, int], None]] = None,
+) -> list[AuthorizedEmailMessage]:
     """
     Estrategia de dos fases optimizada para máxima detección de datos personales:
 
@@ -378,6 +388,9 @@ async def _fetch_gmail_messages(access_token: str, max_messages: int) -> list[Au
 
         selected_refs = message_refs[:max_messages]
         sem_meta = asyncio.Semaphore(SEM_META)
+        total_refs = len(selected_refs)
+        if progress_cb:
+            progress_cb(0, total_refs)
 
         async def fetch_meta(ref: dict[str, Any]) -> tuple[str, AuthorizedEmailMessage | None]:
             msg_id = ref.get("id", "")
@@ -404,7 +417,15 @@ async def _fetch_gmail_messages(access_token: str, max_messages: int) -> list[Au
                 except Exception:
                     return msg_id, None
 
-        meta_results = await asyncio.gather(*(fetch_meta(ref) for ref in selected_refs))
+        # Se procesa en lotes para reportar avance "X de Y" y no disparar todas
+        # las peticiones de golpe en buzones grandes.
+        META_BATCH = 1000
+        meta_results: list[tuple[str, AuthorizedEmailMessage | None]] = []
+        for start in range(0, total_refs, META_BATCH):
+            chunk = selected_refs[start:start + META_BATCH]
+            meta_results.extend(await asyncio.gather(*(fetch_meta(ref) for ref in chunk)))
+            if progress_cb:
+                progress_cb(min(start + META_BATCH, total_refs), total_refs)
 
     # Índice id → (mensaje_meta, posición_en_lista)
     meta_by_id: dict[str, AuthorizedEmailMessage] = {}

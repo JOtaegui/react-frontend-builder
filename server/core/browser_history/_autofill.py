@@ -17,16 +17,13 @@ from __future__ import annotations
 
 import shutil
 import sqlite3
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
-WEB_DATA_PATH = (
-    Path.home()
-    / "Library" / "Application Support"
-    / "Google" / "Chrome" / "Default" / "Web Data"
-)
-WEB_DATA_TMP = Path("/tmp/chrome_webdata_osint_tmp.db")
+# Copia temporal multiplataforma (en Windows /tmp no existe).
+WEB_DATA_TMP = Path(tempfile.gettempdir()) / "osint_webdata_tmp.db"
 
 # ── Mapeo de nombre de campo HTML → categoría de dato ─────────────────────────
 # Para agregar una categoría nueva: añade una clave y sus patrones.
@@ -108,10 +105,28 @@ def _classify_field(name: str) -> Optional[str]:
 
 # ── Lectura de Web Data ───────────────────────────────────────────────────────
 
-def _copy_web_data() -> Optional[Path]:
-    if not WEB_DATA_PATH.exists():
+def _resolve_web_data_path(profile_dir: Optional[Path]) -> Optional[Path]:
+    """'Web Data' vive en la carpeta de perfil del navegador Chromium. Si no se
+    entrega un perfil, cae al perfil por defecto de Chrome del SO actual."""
+    if profile_dir is None:
+        try:
+            from ._readers import get_reader
+            profile_dir = get_reader("chrome").chromium_profile_dir()
+        except Exception:
+            profile_dir = None
+    if profile_dir is None:
         return None
-    shutil.copy2(str(WEB_DATA_PATH), str(WEB_DATA_TMP))
+    return profile_dir / "Web Data"
+
+
+def _copy_web_data(profile_dir: Optional[Path]) -> Optional[Path]:
+    path = _resolve_web_data_path(profile_dir)
+    if path is None or not path.exists():
+        return None
+    try:
+        shutil.copy2(str(path), str(WEB_DATA_TMP))
+    except Exception:
+        return None
     return WEB_DATA_TMP
 
 
@@ -176,15 +191,16 @@ def _read_address_profiles(conn: sqlite3.Connection) -> dict[str, list[str]]:
 
 # ── Punto de entrada ──────────────────────────────────────────────────────────
 
-def read_chrome_autofill() -> AutofillSnapshot:
+def read_chrome_autofill(profile_dir: Optional[Path] = None) -> AutofillSnapshot:
     """
-    Lee Web Data de Chrome y devuelve un AutofillSnapshot con todos los
-    datos personales encontrados en formularios del usuario.
+    Lee 'Web Data' del navegador Chromium indicado por `profile_dir` (Chrome,
+    Brave, Edge…) y devuelve un AutofillSnapshot con los datos personales
+    encontrados en formularios del usuario. Funciona en macOS y Windows.
 
     Si Web Data no existe o falla, devuelve un snapshot vacío (disponible=False)
     en lugar de lanzar excepción — el pipeline puede continuar sin autofill.
     """
-    db_path = _copy_web_data()
+    db_path = _copy_web_data(profile_dir)
     if not db_path:
         return AutofillSnapshot(disponible=False)
 

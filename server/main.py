@@ -31,7 +31,7 @@ from fastapi.staticfiles import StaticFiles
 from config import APP_NAME, APP_VERSION, BAJA_REPORT_DESTINATION, DEBUG, CORS_ORIGINS
 from core.email_identification import identify_email_footprint
 from core.browser_history import analyze_browser_history_async, REGISTRY as BROWSER_REGISTRY
-from core.breach_crossref import run_breach_crossref
+from core.breach_crossref import run_breach_crossref, check_domains_hibp
 from core.breach_scraper import run_scraper as run_breach_scraper, scraper_stats, load_incidents
 from core.email_sender import (
     is_smtp_configured, send_baja_report, send_baja_report_via_gmail_api,
@@ -155,18 +155,39 @@ async def osint_search(
     return OSINTResponse(**response_dict)
 
 
+async def _perform_email_identification(
+    request: EmailIdentificationRequest,
+    progress_cb=None,
+) -> EmailIdentificationResponse:
+    """Ejecuta el análisis de correo y, si hay token, el monitor de bajas.
+    Compartido por el endpoint síncrono y por el trabajo en segundo plano."""
+    result = await identify_email_footprint(request, progress_cb=progress_cb)
+
+    # ── Monitor automático de bajas ───────────────────────────────────────────
+    # Corre solo cuando hay token de Gmail. Si falla, no rompe el análisis.
+    token = request.gmail_access_token
+    if token:
+        try:
+            violations = await scan_all_active_bajas(token)
+            if violations:
+                logger.info("[baja-monitor] %d violación(es) detectada(s) durante el sync", len(violations))
+                violation_models = [BajaViolationFound(**v) for v in violations]
+                result = result.model_copy(update={"baja_violations": violation_models})
+        except Exception as exc:
+            logger.warning("[baja-monitor] Error en monitor automático: %s", exc)
+
+    return result
+
+
 @app.post("/api/identification/email-footprint", response_model=EmailIdentificationResponse)
 async def email_identification(request: EmailIdentificationRequest):
     """
-    Fase 1: identificación por correo autorizado.
-    Acepta mensajes manuales para pruebas y Gmail API con bearer token temporal.
-
-    Al finalizar el análisis, corre automáticamente el monitor de bajas:
-    detecta correos nuevos de dominios con baja activa y los registra como
-    violaciones sin necesidad de ningún paso manual del usuario.
+    Fase 1: identificación por correo autorizado (síncrono).
+    Se mantiene para mensajes manuales y análisis pequeños. Para buzones grandes
+    usa el flujo por trabajo en segundo plano (/start + /status), que no expira.
     """
     try:
-        result = await identify_email_footprint(request)
+        return await _perform_email_identification(request)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except httpx.HTTPStatusError as exc:
@@ -176,24 +197,67 @@ async def email_identification(request: EmailIdentificationRequest):
         logger.error(f"Error en identificación de email: {exc}", exc_info=True)
         raise HTTPException(status_code=500, detail="No se pudo completar la identificación por correo")
 
-    # ── Monitor automático de bajas ───────────────────────────────────────────
-    # Corre solo cuando hay token de Gmail (provider=gmail o manual con token).
-    # Si falla, no rompe el análisis principal — solo logea y sigue.
-    token = request.gmail_access_token
-    if token:
-        try:
-            violations = await scan_all_active_bajas(token)
-            if violations:
-                logger.info(
-                    "[baja-monitor] %d violación(es) detectada(s) durante el sync",
-                    len(violations),
-                )
-                violation_models = [BajaViolationFound(**v) for v in violations]
-                result = result.model_copy(update={"baja_violations": violation_models})
-        except Exception as exc:
-            logger.warning("[baja-monitor] Error en monitor automático: %s", exc)
 
-    return result
+# ── Análisis de correo en segundo plano (no expira; con progreso) ─────────────
+# Registro en memoria de trabajos. Es una app local de un solo usuario, así que
+# un dict en memoria es suficiente; se podan los terminados más antiguos.
+_EMAIL_JOBS: dict[str, dict] = {}
+_EMAIL_JOBS_MAX = 12
+
+
+def _prune_email_jobs() -> None:
+    if len(_EMAIL_JOBS) <= _EMAIL_JOBS_MAX:
+        return
+    finished = [j for j, s in _EMAIL_JOBS.items() if s.get("status") in ("done", "error")]
+    for job_id in finished[: max(0, len(_EMAIL_JOBS) - _EMAIL_JOBS_MAX)]:
+        _EMAIL_JOBS.pop(job_id, None)
+
+
+async def _run_email_job(job_id: str, request: EmailIdentificationRequest) -> None:
+    state = _EMAIL_JOBS[job_id]
+
+    def cb(done: int, total: int) -> None:
+        state["processed"] = done
+        state["total"] = total
+
+    try:
+        result = await _perform_email_identification(request, progress_cb=cb)
+        state["result"] = result.model_dump()
+        state["status"] = "done"
+    except ValueError as exc:
+        state["status"], state["error"] = "error", str(exc)
+    except httpx.HTTPStatusError as exc:
+        detail = exc.response.text[:300] if exc.response is not None else str(exc)
+        state["status"], state["error"] = "error", f"Proveedor de correo rechazó la solicitud: {detail}"
+    except Exception as exc:
+        logger.error(f"[email-job {job_id}] {exc}", exc_info=True)
+        state["status"], state["error"] = "error", "No se pudo completar la identificación por correo"
+
+
+@app.post("/api/identification/email-footprint/start")
+async def email_identification_start(request: EmailIdentificationRequest):
+    """Inicia el análisis en segundo plano y devuelve un job_id para sondear."""
+    import uuid as _uuid
+    job_id = _uuid.uuid4().hex
+    _EMAIL_JOBS[job_id] = {"status": "running", "processed": 0, "total": 0, "result": None, "error": None}
+    _prune_email_jobs()
+    asyncio.create_task(_run_email_job(job_id, request))
+    return {"job_id": job_id}
+
+
+@app.get("/api/identification/email-footprint/status")
+async def email_identification_status(job_id: str):
+    """Estado del análisis: running (con processed/total), done (con result) o error."""
+    state = _EMAIL_JOBS.get(job_id)
+    if state is None:
+        raise HTTPException(status_code=404, detail="Trabajo no encontrado o ya expirado.")
+    return {
+        "status":    state["status"],
+        "processed": state["processed"],
+        "total":     state["total"],
+        "error":     state["error"],
+        "result":    state["result"] if state["status"] == "done" else None,
+    }
 
 
 @app.get("/api/identification/baja-status")
@@ -1157,6 +1221,30 @@ async def poc_simular_reincidencia(payload: dict):
 
 
 # ── Historial de navegación (Chrome local) ───────────────────────────────────
+@app.get("/api/local/system-info")
+async def system_info():
+    """Reporta el sistema operativo detectado y qué navegadores están realmente
+    disponibles en este equipo (cuyo archivo de historial existe). Permite que la
+    interfaz se adapte al SO y ofrezca solo los navegadores instalados."""
+    from core.browser_history._readers import OS_NAME, get_reader, REGISTRY as _REG
+    os_label = {"Darwin": "macOS", "Windows": "Windows", "Linux": "Linux"}.get(OS_NAME, OS_NAME)
+    available = []
+    for slug in _REG:
+        # Safari en macOS siempre está instalado, pero su historial puede estar
+        # protegido por TCC y .exists() devolver False sin Acceso completo al
+        # disco. Se ofrece igual; si falta el permiso, el análisis lo indicará.
+        if slug == "safari":
+            if OS_NAME == "Darwin":
+                available.append(slug)
+            continue
+        try:
+            if get_reader(slug).history_db_path.exists():
+                available.append(slug)
+        except Exception:
+            pass
+    return {"os": OS_NAME, "os_label": os_label, "available_browsers": available}
+
+
 @app.get("/api/local/browser-history")
 async def browser_history_analysis(
     browser: str = Query(default="chrome", description=f"Navegador a analizar. Opciones: {', '.join(['chrome', 'brave', 'edge', 'firefox', 'chrome-canary'])}"),
@@ -1302,6 +1390,19 @@ async def breach_scraper_incidents(confidence: str = Query(default="medium")):
 async def breach_scraper_stats_endpoint():
     """Estadísticas del store de incidentes."""
     return scraper_stats()
+
+
+class HibpCheckRequest(BaseModel):
+    domains: list[str] = []
+
+
+@app.post("/api/local/hibp-check")
+async def hibp_check_endpoint(req: HibpCheckRequest):
+    """Consulta HIBP por una lista de dominios (solo por dominio, sin datos del
+    usuario). Permite que la vista consolidada muestre el estado de filtración
+    sin pasar por el cruce completo."""
+    results = await check_domains_hibp(req.domains[:150])
+    return {"results": results}
 
 
 # ── Historial ─────────────────────────────────────────────────────────────────

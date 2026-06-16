@@ -229,6 +229,28 @@ async def _fetch_hibp_breaches(client: httpx.AsyncClient, domain: str) -> list[d
         return []
 
 
+async def check_domains_hibp(domains: list[str], concurrency: int = 6) -> dict[str, dict]:
+    """Consulta HIBP por una lista de dominios y devuelve, por dominio, si tiene
+    filtración conocida y los nombres de las brechas. Pensado para que la vista
+    consolidada pueda mostrar el estado HIBP sin pasar por el cruce completo.
+    """
+    out: dict[str, dict] = {}
+    seen = list(dict.fromkeys(d.strip().lower() for d in domains if d and d.strip()))
+    if not seen:
+        return out
+    sem = asyncio.Semaphore(concurrency)
+    async with httpx.AsyncClient() as client:
+        async def one(dom: str) -> None:
+            async with sem:
+                breaches = await _fetch_hibp_breaches(client, dom)
+            out[dom] = {
+                "hibpBreach":  len(breaches) > 0,
+                "breachNames": [b["name"] for b in breaches if b.get("name")],
+            }
+        await asyncio.gather(*(one(d) for d in seen))
+    return out
+
+
 # ── Pipeline principal ────────────────────────────────────────────────────────
 
 async def run_breach_crossref(

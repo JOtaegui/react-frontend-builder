@@ -78,7 +78,9 @@ GOOGLE_OAUTH_CLIENT_ID = os.getenv("GOOGLE_OAUTH_CLIENT_ID", "")
 GOOGLE_OAUTH_CLIENT_SECRET = os.getenv("GOOGLE_OAUTH_CLIENT_SECRET", "")
 GOOGLE_OAUTH_REDIRECT_URI = os.getenv(
     "GOOGLE_OAUTH_REDIRECT_URI",
-    "http://localhost:8000/api/auth/gmail/callback",
+    # Debe coincidir EXACTAMENTE con un URI de redirección autorizado en Google
+    # Cloud. El puerto 8787 es el de la app standalone (y el que registra Google).
+    "http://localhost:8787/api/auth/gmail/callback",
 )
 EMAIL_EXTRACTION_PROVIDER = os.getenv("EMAIL_EXTRACTION_PROVIDER", "none").strip().lower()
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")

@@ -37,6 +37,7 @@ from models.schemas import (
     ConsolidatedCandidate,
     ConsolidatedDataPoint,
     ConsolidatedUserProfile,
+    EmailSearchTargets,
     IdentifiedSender,
 )
 
@@ -106,6 +107,7 @@ class _Candidate:
 def build_consolidated_profile(
     senders: list[IdentifiedSender],
     email_address: Optional[str] = None,
+    search_targets: Optional[EmailSearchTargets] = None,
 ) -> Optional[ConsolidatedUserProfile]:
     if not senders:
         return None
@@ -131,6 +133,16 @@ def build_consolidated_profile(
                 if winner_domains & set(candidate.domain_weights):
                     candidate.score *= 1.1
 
+    # Un valor que el propio usuario ingresó como objetivo de búsqueda es dato
+    # confirmado por él mismo: si ese valor aparece entre los candidatos, debe
+    # ganar aunque otro tenga más peso por fuentes.
+    if search_targets is not None:
+        _apply_target_boost(names, search_targets.nombre, _name_matches_target)
+        _apply_target_boost(ruts, search_targets.rut, lambda v, t: normalize_rut(v) == normalize_rut(t))
+        _apply_target_boost(addresses, search_targets.direccion, _address_matches_target)
+        _apply_target_boost(phones, search_targets.telefono, _phone_matches_target)
+        _apply_target_boost(plates, search_targets.patente, lambda v, t: normalize_plate(v) == normalize_plate(t))
+
     profile = ConsolidatedUserProfile(
         name=_to_data_point(names),
         rut=_to_data_point(ruts),
@@ -138,9 +150,73 @@ def build_consolidated_profile(
         phone=_to_data_point(phones),
         plate=_to_data_point(plates),
     )
+
+    # Tras ganar, el valor confirmado por el usuario se marca con confianza alta.
+    if search_targets is not None:
+        _confirm_with_targets(profile, search_targets)
+
     if not any([profile.name, profile.rut, profile.address, profile.phone, profile.plate]):
         return None
     return profile
+
+
+def _apply_target_boost(pool: dict[str, _Candidate], target, matches) -> None:
+    """Hace ganar al candidato que coincide con el dato declarado por el usuario."""
+    if not target or not str(target).strip():
+        return
+    for candidate in pool.values():
+        try:
+            if matches(candidate.display, str(target)):
+                candidate.score *= 100.0
+        except Exception:
+            continue
+
+
+def _confirm_with_targets(profile: ConsolidatedUserProfile, targets: EmailSearchTargets) -> None:
+    """Eleva a confianza alta los datos que coinciden con lo que el usuario
+    declaró como propio en los parámetros de búsqueda."""
+    checks = [
+        (profile.name, targets.nombre, _name_matches_target),
+        (profile.rut, targets.rut, lambda v, t: normalize_rut(v) == normalize_rut(t)),
+        (profile.address, targets.direccion, _address_matches_target),
+        (profile.phone, targets.telefono, _phone_matches_target),
+        (profile.plate, targets.patente, lambda v, t: normalize_plate(v) == normalize_plate(t)),
+    ]
+    for point, target, matches in checks:
+        if not point or not target or not str(target).strip():
+            continue
+        try:
+            confirmed = matches(point.value, str(target))
+        except Exception:
+            confirmed = False
+        if confirmed:
+            point.confidence_level = "alta"
+            point.confidence = max(point.confidence, 0.95)
+
+
+def _name_matches_target(value: str, target: str) -> bool:
+    vt, tt = _name_key_tokens(value), _name_key_tokens(target)
+    if not vt or not tt:
+        return False
+    small, big = (vt, tt) if len(vt) <= len(tt) else (tt, vt)
+    return all(tok in big for tok in small)
+
+
+def _address_matches_target(value: str, target: str) -> bool:
+    fv = address_fingerprint(_canonical_address(value))
+    ft = address_fingerprint(_canonical_address(target))
+    if fv and ft and (fv == ft):
+        return True
+    a = re.sub(r"[^a-z0-9]+", " ", _strip_accents(value).lower()).strip()
+    b = re.sub(r"[^a-z0-9]+", " ", _strip_accents(target).lower()).strip()
+    return bool(a) and bool(b) and (a in b or b in a)
+
+
+def _phone_matches_target(value: str, target: str) -> bool:
+    nv, nt = normalize_phone(value), normalize_phone(target)
+    if nv and nt:
+        return re.sub(r"\D", "", nv)[-8:] == re.sub(r"\D", "", nt)[-8:]
+    return False
 
 
 # ── Peso del remitente ───────────────────────────────────────────────────────
