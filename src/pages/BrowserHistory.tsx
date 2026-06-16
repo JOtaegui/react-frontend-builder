@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Layout } from "@/components/Layout";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -13,6 +13,7 @@ import {
 
 const BROWSER_OPTIONS = [
   { value: "chrome",        label: "Google Chrome"  },
+  { value: "safari",        label: "Safari"         },
   { value: "brave",         label: "Brave"          },
   { value: "edge",          label: "Microsoft Edge" },
   { value: "firefox",       label: "Firefox"        },
@@ -114,6 +115,14 @@ export default function BrowserHistory() {
   const [error,       setError]       = useState<string | null>(null);
   const [sendingBaja, setSendingBaja] = useState<string | null>(null);
   const [bajaOk,      setBajaOk]      = useState<string | null>(null);
+
+  // Restaurar el último resultado guardado (p. ej. analizado desde el Inicio).
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem("browser_history_result");
+      if (raw) setResult(JSON.parse(raw) as BrowserHistoryResponse);
+    } catch { /* ignore */ }
+  }, []);
 
   // ── Análisis ────────────────────────────────────────────────────────────────
   async function handleAnalyze() {

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { Layout } from "@/components/Layout";
 import { Button } from "@/components/ui/button";
@@ -62,8 +62,24 @@ interface EmailSender {
   risk: { level: "low" | "medium" | "high" };
 }
 
+interface ConsolidatedCandidateRef {
+  value: string;
+}
+interface ConsolidatedDataPoint {
+  value: string;
+  alternatives?: ConsolidatedCandidateRef[];
+}
+interface ConsolidatedUserProfile {
+  name?: ConsolidatedDataPoint | null;
+  rut?: ConsolidatedDataPoint | null;
+  address?: ConsolidatedDataPoint | null;
+  phone?: ConsolidatedDataPoint | null;
+  plate?: ConsolidatedDataPoint | null;
+}
+
 interface EmailIdentificationResponse {
   email_address?: string | null;
+  consolidated_profile?: ConsolidatedUserProfile | null;
   senders: EmailSender[];
 }
 
@@ -145,19 +161,54 @@ function riskScore(level: "low" | "medium" | "high"): number {
   return 5;
 }
 
-function companyScore(c: ConsolidatedCompany): number {
-  const sourceBonus = c.sources.length === 2 ? 100 : 0;
+interface BreachStatus { inCl: boolean; inHibp: boolean; }
+
+// Sensibilidad por tipo de dato: cuánto agrava la exposición que la empresa lo
+// posea (un RUT o una dirección pesan más que solo el nombre).
+const DATA_SENSITIVITY: Record<string, number> = {
+  rut: 25, direccion: 20, telefono: 15, patente: 12, email: 10, nombre: 6,
+};
+
+// Puntaje de riesgo por empresa. Prioriza, en orden de peso:
+//   1. Exposición por filtración conocida (incidente chileno o HIBP).
+//   2. Sensibilidad de los datos que la empresa efectivamente posee.
+//   3. Certeza de la relación (doble fuente + login/compra).
+//   4. Clasificación de riesgo del backend.
+//   5. Volumen de interacción (solo desempate).
+function companyScore(
+  c: ConsolidatedCompany,
+  breach: BreachStatus,
+  profile?: ConsolidatedUserProfile | null,
+): number {
+  // 1) Filtración: la señal más fuerte de exposición real. El incidente chileno
+  //    pesa más por ser local, reciente y accionable bajo la Ley 21.719.
+  const breachScore = (breach.inCl ? 80 : 0) + (breach.inHibp ? 50 : 0);
+
+  // 2) Sensibilidad de los datos, contrastados contra el resumen para no contar
+  //    falsos positivos.
+  const present = new Set<string>();
+  if (filterByProfile(c.personal_names, profile?.name, matchesName).length) present.add("nombre");
+  if (filterByProfile(c.personal_ruts, profile?.rut, matchesRut).length) present.add("rut");
+  if (filterByProfile(c.personal_addresses, profile?.address, matchesAddress).length) present.add("direccion");
+  if (filterByProfile(c.personal_phones, profile?.phone, matchesPhone).length) present.add("telefono");
+  if (filterByProfile(c.personal_plates, profile?.plate, matchesPlate).length) present.add("patente");
+  for (const d of c.confirmed_data) {
+    if (filterAutofillValues(d.tipo_key, d.valores, profile).length) present.add(d.tipo_key);
+  }
+  let dataScore = 0;
+  present.forEach(t => { dataScore += DATA_SENSITIVITY[t] ?? 5; });
+
+  // 3) Certeza de la relación con la empresa.
+  const bothSources = c.sources.length === 2 ? 30 : 0;
+  const activity = (c.browser_login_detected || c.browser_checkout_detected) ? 20 : 0;
+
+  // 4) Clasificación de riesgo del backend.
   const risk = riskScore(c.risk_level);
-  const dataCount = new Set([
-    ...(c.personal_names.length > 0 ? ["nombre"] : []),
-    ...(c.personal_ruts.length > 0 ? ["rut"] : []),
-    ...(c.personal_addresses.length > 0 ? ["direccion"] : []),
-    ...(c.personal_phones.length > 0 ? ["telefono"] : []),
-    ...(c.personal_plates.length > 0 ? ["patente"] : []),
-    ...c.confirmed_data.map(d => d.tipo_key),
-  ]).size;
-  const volume = Math.min(c.email_message_count + c.browser_visit_count, 50);
-  return sourceBonus + risk + dataCount * 10 + volume;
+
+  // 5) Volumen (desempate, peso acotado).
+  const volume = Math.min((c.email_message_count + c.browser_visit_count) / 20, 10);
+
+  return breachScore + dataScore + bothSources + activity + risk + volume;
 }
 
 function riskVariant(level: string): "destructive" | "default" | "secondary" {
@@ -313,12 +364,128 @@ interface ConfirmedField {
   colorBorder: string;
 }
 
-function buildConfirmedFields(c: ConsolidatedCompany): ConfirmedField[] {
+// ── Filtrado contra el resumen final (perfil consolidado) ──────────────────
+// El resumen final cruza datos entre todas las empresas y valida; es nuestra
+// verdad de referencia. La vista por empresa, en cambio, muestra extracciones
+// crudas que arrastran falsos positivos: texto de marketing tomado como nombre
+// o dirección, y datos de autocompletado de prueba (RUTs/teléfonos falsos).
+// Por eso, para cada tipo donde el resumen tiene un valor aceptado, solo se
+// muestran los valores de la empresa compatibles con ese valor o sus
+// alternativas. Donde el resumen no opina (campo nulo), no se filtra.
+
+function acceptedValues(point?: ConsolidatedDataPoint | null): string[] {
+  if (!point) return [];
+  return [point.value, ...(point.alternatives ?? []).map(a => a.value)].filter(Boolean);
+}
+const _stripAcc = (s: string) => s.normalize("NFD").replace(/[̀-ͯ]/g, "");
+function _nameTokens(s: string): string[] {
+  return _stripAcc(s.toLowerCase()).replace(/[^a-z\s]/g, " ").split(/\s+/).filter(Boolean);
+}
+// Un token calza con otro si es igual o si es una inicial ("j" calza con "juan").
+function _tokenMatches(a: string, b: string): boolean {
+  if (a === b) return true;
+  if (a.length === 1) return b.startsWith(a);
+  if (b.length === 1) return a.startsWith(b);
+  return false;
+}
+function matchesName(candidate: string, accepted: string[]): boolean {
+  const ct = _nameTokens(candidate);
+  if (ct.length === 0) return false;
+  return accepted.some(acc => {
+    const at = _nameTokens(acc);
+    if (at.length === 0) return false;
+    // Todos los tokens del más corto deben tener correspondencia en el más
+    // largo (igualdad o inicial). Así "Juan Otaegui", "J. Otaegui" y
+    // "Juan I. Otaegui" calzan con "Juan Ignacio Otaegui", pero "Juan Ignacio
+    // Aprovecha" no, porque "aprovecha" no corresponde a ningún token real.
+    const [small, big] = ct.length <= at.length ? [ct, at] : [at, ct];
+    return small.every(t => big.some(u => _tokenMatches(t, u)));
+  });
+}
+function _addrNorm(s: string): string {
+  return _stripAcc(s.toLowerCase()).replace(/[^a-z0-9]+/g, " ").trim();
+}
+function matchesAddress(candidate: string, accepted: string[]): boolean {
+  const c = _addrNorm(candidate);
+  if (c.length < 4) return false;
+  return accepted.some(acc => {
+    const a = _addrNorm(acc);
+    return a.length >= 4 && (c.includes(a) || a.includes(c));
+  });
+}
+function _rutKey(s: string): string { return s.toUpperCase().replace(/[^0-9K]/g, ""); }
+function matchesRut(candidate: string, accepted: string[]): boolean {
+  const c = _rutKey(candidate);
+  return c.length >= 7 && accepted.some(acc => _rutKey(acc) === c);
+}
+function _phoneKey(s: string): string { return s.replace(/\D/g, "").slice(-8); }
+function matchesPhone(candidate: string, accepted: string[]): boolean {
+  const c = _phoneKey(candidate);
+  return c.length === 8 && accepted.some(acc => _phoneKey(acc) === c);
+}
+function _plateKey(s: string): string { return s.toUpperCase().replace(/[^A-Z0-9]/g, ""); }
+function matchesPlate(candidate: string, accepted: string[]): boolean {
+  const c = _plateKey(candidate);
+  return c.length >= 5 && accepted.some(acc => _plateKey(acc) === c);
+}
+
+// Filtra una lista de valores contra el resumen para un tipo dado. Si el
+// resumen no tiene referencia para ese tipo, devuelve la lista intacta.
+function filterByProfile(
+  values: string[],
+  point: ConsolidatedDataPoint | null | undefined,
+  matcher: (v: string, accepted: string[]) => boolean,
+): string[] {
+  if (!point) return values;                 // sin referencia → no se filtra
+  const accepted = acceptedValues(point);
+  if (accepted.length === 0) return values;
+  return values.filter(v => matcher(v, accepted));
+}
+
+// Filtra los valores de un campo de autocompletado de Chrome contra el resumen.
+// El autocompletado del navegador es GLOBAL (Chrome guarda direcciones, RUTs y
+// teléfonos una sola vez y se atribuyen a toda empresa con login/compra), por lo
+// que arrastra datos que el usuario ingresó en otros sitios. Solo se conservan
+// los valores consistentes con el resumen final. Email y usuario no tienen
+// referencia en el perfil, por lo que no se filtran.
+function filterAutofillValues(
+  tipoKey: string,
+  valores: string[],
+  profile?: ConsolidatedUserProfile | null,
+): string[] {
+  switch (tipoKey) {
+    case "nombre":    return filterByProfile(valores, profile?.name, matchesName);
+    case "rut":       return filterByProfile(valores, profile?.rut, matchesRut);
+    case "telefono":  return filterByProfile(valores, profile?.phone, matchesPhone);
+    case "direccion": return filterByProfile(valores, profile?.address, matchesAddress);
+    case "patente":   return filterByProfile(valores, profile?.plate, matchesPlate);
+    case "email":     return valores.filter(v => !_isPlaceholderEmail(v));
+    default:          return valores;
+  }
+}
+
+// Correos de prueba/placeholder que Chrome guarda en su autocompletado y no
+// corresponden a una cuenta real del usuario (no hay referencia en el perfil
+// para validarlos, por lo que se descartan por patrón).
+function _isPlaceholderEmail(email: string): boolean {
+  const s = email.trim().toLowerCase();
+  if (!s.includes("@")) return true;
+  if (/@(example|test|sample|ejemplo|domain|email|mail|tld)\.(com|org|net|cl|io)$/.test(s)) return true;
+  if (/^(test|prueba|ejemplo|demo|sample|noreply|no-reply|donotreply|do-not-reply|admin|root|user|usuario|cliente\d*|correo\d*)@/.test(s)) return true;
+  return false;
+}
+
+function buildConfirmedFields(
+  c: ConsolidatedCompany,
+  profile?: ConsolidatedUserProfile | null,
+): ConfirmedField[] {
   const fields: ConfirmedField[] = [];
 
-  // Sin filtros heurísticos — el backend del mail ya validó estos valores.
-  // Solo se aplica normalización de formato para display.
-  const names = dedup(c.personal_names.map(normalizeName)).slice(0, 3);
+  // Cada tipo se contrasta contra el resumen final para descartar falsos
+  // positivos; donde el resumen no tiene valor, se conserva lo extraído.
+  const names = dedup(
+    filterByProfile(c.personal_names, profile?.name, matchesName).map(normalizeName),
+  ).slice(0, 3);
   if (names.length > 0)
     fields.push({
       key: "nombre", label: "Nombre",
@@ -327,7 +494,9 @@ function buildConfirmedFields(c: ConsolidatedCompany): ConfirmedField[] {
       colorBg: "bg-blue-500/10", colorText: "text-blue-700 dark:text-blue-300", colorBorder: "border-blue-500/20",
     });
 
-  const ruts = dedup(c.personal_ruts.map(normalizeRut)).slice(0, 2);
+  const ruts = dedup(
+    filterByProfile(c.personal_ruts, profile?.rut, matchesRut).map(normalizeRut),
+  ).slice(0, 2);
   if (ruts.length > 0)
     fields.push({
       key: "rut", label: "RUT",
@@ -336,7 +505,9 @@ function buildConfirmedFields(c: ConsolidatedCompany): ConfirmedField[] {
       colorBg: "bg-purple-500/10", colorText: "text-purple-700 dark:text-purple-300", colorBorder: "border-purple-500/20",
     });
 
-  const phones = dedup(c.personal_phones.map(normalizePhone)).slice(0, 3);
+  const phones = dedup(
+    filterByProfile(c.personal_phones, profile?.phone, matchesPhone).map(normalizePhone),
+  ).slice(0, 3);
   if (phones.length > 0)
     fields.push({
       key: "telefono", label: "Teléfono",
@@ -345,7 +516,9 @@ function buildConfirmedFields(c: ConsolidatedCompany): ConfirmedField[] {
       colorBg: "bg-emerald-500/10", colorText: "text-emerald-700 dark:text-emerald-300", colorBorder: "border-emerald-500/20",
     });
 
-  const addresses = dedup(c.personal_addresses).slice(0, 2);
+  const addresses = dedup(
+    filterByProfile(c.personal_addresses, profile?.address, matchesAddress),
+  ).slice(0, 2);
   if (addresses.length > 0)
     fields.push({
       key: "direccion", label: "Dirección",
@@ -354,7 +527,9 @@ function buildConfirmedFields(c: ConsolidatedCompany): ConfirmedField[] {
       colorBg: "bg-amber-500/10", colorText: "text-amber-700 dark:text-amber-300", colorBorder: "border-amber-500/20",
     });
 
-  const plates = dedup(c.personal_plates.map(normalizePlate)).slice(0, 2);
+  const plates = dedup(
+    filterByProfile(c.personal_plates, profile?.plate, matchesPlate).map(normalizePlate),
+  ).slice(0, 2);
   if (plates.length > 0)
     fields.push({
       key: "patente", label: "Patente",
@@ -363,9 +538,11 @@ function buildConfirmedFields(c: ConsolidatedCompany): ConfirmedField[] {
       colorBg: "bg-orange-500/10", colorText: "text-orange-700 dark:text-orange-300", colorBorder: "border-orange-500/20",
     });
 
-  // Datos confirmados de Chrome autofill (son igualmente ciertos, distinta fuente)
+  // Datos del autocompletado de Chrome. El navegador suele guardar datos de
+  // prueba o de terceros (RUTs, teléfonos y correos falsos), por lo que se
+  // contrastan contra el resumen final igual que los del correo.
   for (const d of c.confirmed_data) {
-    const vals = dedup(d.valores).slice(0, 2);
+    const vals = dedup(filterAutofillValues(d.tipo_key, d.valores, profile)).slice(0, 2);
     if (vals.length === 0) continue;
     // Evitar duplicar si ya tenemos el mismo tipo por email
     const alreadyHave = fields.some(f => f.key === d.tipo_key);
@@ -524,6 +701,8 @@ export default function VistaConsolidada() {
   const [clDomains, setClDomains]   = useState<Set<string>>(new Set());
   const [hibpCache, setHibpCache]   = useState<BreachCache>(new Map());
   const [breachReady, setBreachReady] = useState(false);
+  const [hibpLoading, setHibpLoading] = useState(false);
+  const hibpFetchingRef = useRef(false);
 
   // ── Leer localStorage ────────────────────────────────────────────────────
   const { emailResult, browserResult, storedHolder } = useMemo(() => {
@@ -540,6 +719,10 @@ export default function VistaConsolidada() {
       return { emailResult: null, browserResult: null, storedHolder: "" };
     }
   }, []);
+
+  // Resumen final (perfil consolidado): verdad de referencia para filtrar
+  // falsos positivos en los detalles por empresa.
+  const profile = emailResult?.consolidated_profile ?? null;
 
   useEffect(() => {
     if (storedHolder && !holderEmail) setHolderEmail(storedHolder);
@@ -576,8 +759,8 @@ export default function VistaConsolidada() {
     return () => { cancelled = true; };
   }, []);  // eslint-disable-line react-hooks/exhaustive-deps
 
-  // ── Merge y ranking ──────────────────────────────────────────────────────
-  const rankedCompanies = useMemo<ConsolidatedCompany[]>(() => {
+  // ── Merge (fusión por dominio) ───────────────────────────────────────────
+  const mergedCompanies = useMemo<ConsolidatedCompany[]>(() => {
     const map = new Map<string, ConsolidatedCompany>();
 
     for (const sender of emailResult?.senders ?? []) {
@@ -684,8 +867,77 @@ export default function VistaConsolidada() {
       }
     }
 
-    return Array.from(map.values()).sort((a, b) => companyScore(b) - companyScore(a));
+    return Array.from(map.values());
   }, [emailResult, browserResult]);
+
+  // ── Ranking por riesgo ────────────────────────────────────────────────────
+  // Se ordena fuera del merge para reaccionar cuando llegan los datos de
+  // filtraciones (lista CL y caché HIBP), que se cargan de forma asíncrona.
+  const rankedCompanies = useMemo<ConsolidatedCompany[]>(() => {
+    const breachOf = (c: ConsolidatedCompany): BreachStatus => {
+      const key = normalizeDomainKey(c.primary_domain);
+      return { inCl: clDomains.has(key), inHibp: hibpCache.get(key)?.hibpBreach ?? false };
+    };
+    return [...mergedCompanies].sort(
+      (a, b) => companyScore(b, breachOf(b), profile) - companyScore(a, breachOf(a), profile),
+    );
+  }, [mergedCompanies, clDomains, hibpCache, profile]);
+
+  // ── Consulta automática a HIBP ────────────────────────────────────────────
+  // Al entrar al consolidado se consultan en HIBP TODOS los dominios (correo +
+  // navegación) que aún no estén en caché, en lotes y con indicador de carga.
+  // Solo viaja el dominio, nunca datos del usuario. El resultado se guarda en la
+  // caché local (48 h) para no repetir consultas en visitas siguientes.
+  // (La lista CL ya se carga completa como conjunto local en el efecto previo.)
+  useEffect(() => {
+    if (mergedCompanies.length === 0 || hibpFetchingRef.current) return;
+    const pending = Array.from(
+      new Set(mergedCompanies.map(c => normalizeDomainKey(c.primary_domain)).filter(Boolean)),
+    ).filter(d => !hibpCache.has(d));
+    if (pending.length === 0) return;
+
+    hibpFetchingRef.current = true;
+    setHibpLoading(true);
+    let cancelled = false;
+
+    (async () => {
+      const CHUNK = 60;
+      for (let i = 0; i < pending.length && !cancelled; i += CHUNK) {
+        const batch = pending.slice(i, i + CHUNK);
+        try {
+          const r = await fetch("/api/local/hibp-check", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ domains: batch }),
+          });
+          const data = await r.json() as { results?: Record<string, { hibpBreach: boolean; breachNames: string[] }> };
+          if (cancelled || !data.results) continue;
+          setHibpCache(prev => {
+            const next = new Map(prev);
+            for (const [dom, info] of Object.entries(data.results!)) {
+              const existing = next.get(dom);
+              next.set(dom, {
+                hasBreached: info.hibpBreach || (existing?.clBreach ?? false),
+                hibpBreach:  info.hibpBreach,
+                clBreach:    existing?.clBreach ?? false,
+                breachNames: info.breachNames ?? [],
+              });
+            }
+            try {
+              const obj: Record<string, BreachCacheEntry> = {};
+              next.forEach((v, k) => { obj[k] = v; });
+              localStorage.setItem(LS_HIBP_CACHE, JSON.stringify({ ts: Date.now(), breaches: obj }));
+            } catch { /* ignore */ }
+            return next;
+          });
+        } catch { /* lote fallido — se omite y se sigue */ }
+      }
+      if (!cancelled) setHibpLoading(false);
+      hibpFetchingRef.current = false;
+    })();
+
+    return () => { cancelled = true; hibpFetchingRef.current = false; };
+  }, [mergedCompanies]);  // eslint-disable-line react-hooks/exhaustive-deps
 
   const stats = useMemo(() => ({
     total:       rankedCompanies.length,
@@ -754,6 +1006,12 @@ export default function VistaConsolidada() {
               Ranking de empresas detectadas en correo y navegación — con datos personales encontrados
             </p>
           </div>
+          {hibpLoading && (
+            <div className="ml-auto flex items-center gap-2 rounded-full border border-red-500/20 bg-red-500/5 px-3 py-1.5 text-xs font-medium text-red-600 dark:text-red-400">
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              Consultando filtraciones (HIBP)…
+            </div>
+          )}
         </div>
 
         {/* Sin datos */}
@@ -817,7 +1075,7 @@ export default function VistaConsolidada() {
                     <ShieldOff className="h-4 w-4 text-red-500 shrink-0" />
                     <span>
                       <strong className="text-red-600 dark:text-red-400">{stats.inHibp}</strong>
-                      {" "}empresa{stats.inHibp !== 1 ? "s" : ""} verificadas en{" "}
+                      {" "}empresa{stats.inHibp !== 1 ? "s" : ""} con filtración en{" "}
                       <span className="font-medium">HIBP</span>
                     </span>
                   </div>
@@ -882,24 +1140,21 @@ export default function VistaConsolidada() {
                               <Badge variant={riskVariant(company.risk_level)}>
                                 {RISK_LABEL[company.risk_level]}
                               </Badge>
+                              {company.email_spam_count > 0 && (
+                                <Badge className="bg-orange-500 text-white hover:bg-orange-500/90">
+                                  <Mail className="mr-1 h-3 w-3" />En spam
+                                </Badge>
+                              )}
                               {clDomains.has(normalizeDomainKey(company.primary_domain)) && (
                                 <Badge className="bg-orange-500 text-white hover:bg-orange-500/90">
                                   <AlertTriangle className="mr-1 h-3 w-3" />Lista CL
                                 </Badge>
                               )}
-                              {(() => {
-                                const entry = hibpCache.get(normalizeDomainKey(company.primary_domain));
-                                if (!entry) return null;
-                                return entry.hibpBreach ? (
-                                  <Badge className="bg-red-600 text-white hover:bg-red-600/90">
-                                    <ShieldOff className="mr-1 h-3 w-3" />HIBP filtrado
-                                  </Badge>
-                                ) : (
-                                  <Badge className="bg-emerald-700 text-white hover:bg-emerald-700/90">
-                                    <ShieldCheck className="mr-1 h-3 w-3" />HIBP ✓
-                                  </Badge>
-                                );
-                              })()}
+                              {hibpCache.get(normalizeDomainKey(company.primary_domain))?.hibpBreach && (
+                                <Badge className="bg-red-600 text-white hover:bg-red-600/90">
+                                  <ShieldOff className="mr-1 h-3 w-3" />HIBP filtrado
+                                </Badge>
+                              )}
                               {sentDomains.has(company.key) && (
                                 <Badge className="bg-emerald-600 text-white">
                                   <CheckCircle2 className="mr-1 h-3 w-3" />Baja enviada
@@ -914,7 +1169,7 @@ export default function VistaConsolidada() {
 
                             {/* Datos personales encontrados con certeza */}
                             {(() => {
-                              const fields = buildConfirmedFields(company);
+                              const fields = buildConfirmedFields(company, emailResult?.consolidated_profile);
                               if (fields.length === 0) return null;
                               return (
                                 <div className="rounded-2xl border border-violet-500/25 bg-violet-500/[0.07] p-4 space-y-3">
@@ -975,21 +1230,37 @@ export default function VistaConsolidada() {
                                         )}
                                       </div>
                                     )}
-                                    {company.personal_names.length > 0 && (
-                                      <div><span className="text-muted-foreground">Nombres: </span>{dedup(company.personal_names.map(normalizeName)).slice(0, 3).join(", ")}</div>
-                                    )}
-                                    {company.personal_ruts.length > 0 && (
-                                      <div><span className="text-muted-foreground">RUT: </span>{dedup(company.personal_ruts.map(normalizeRut)).slice(0, 2).join(", ")}</div>
-                                    )}
-                                    {company.personal_addresses.length > 0 && (
-                                      <div><span className="text-muted-foreground">Dirección: </span>{company.personal_addresses[0]}</div>
-                                    )}
-                                    {company.personal_phones.length > 0 && (
-                                      <div><span className="text-muted-foreground">Teléfono: </span>{dedup(company.personal_phones.map(normalizePhone)).slice(0, 2).join(", ")}</div>
-                                    )}
-                                    {company.personal_plates.length > 0 && (
-                                      <div><span className="text-muted-foreground">Patente: </span>{dedup(company.personal_plates.map(normalizePlate)).slice(0, 2).join(", ")}</div>
-                                    )}
+                                    {(() => {
+                                      // Filtrado contra el resumen final: el nombre conserva
+                                      // sus variantes válidas (Juan Otaegui, J. Otaegui), pero
+                                      // se descartan direcciones/RUTs/teléfonos que no coinciden.
+                                      const evNames = dedup(filterByProfile(company.personal_names, profile?.name, matchesName).map(normalizeName)).slice(0, 3);
+                                      const evRuts  = dedup(filterByProfile(company.personal_ruts, profile?.rut, matchesRut).map(normalizeRut)).slice(0, 2);
+                                      const evAddrs = dedup(filterByProfile(company.personal_addresses, profile?.address, matchesAddress)).slice(0, 1);
+                                      const evPhones = dedup(filterByProfile(company.personal_phones, profile?.phone, matchesPhone).map(normalizePhone)).slice(0, 2);
+                                      return (
+                                        <>
+                                          {evNames.length > 0 && (
+                                            <div><span className="text-muted-foreground">Nombres: </span>{evNames.join(", ")}</div>
+                                          )}
+                                          {evRuts.length > 0 && (
+                                            <div><span className="text-muted-foreground">RUT: </span>{evRuts.join(", ")}</div>
+                                          )}
+                                          {evAddrs.length > 0 && (
+                                            <div><span className="text-muted-foreground">Dirección: </span>{evAddrs[0]}</div>
+                                          )}
+                                          {evPhones.length > 0 && (
+                                            <div><span className="text-muted-foreground">Teléfono: </span>{evPhones.join(", ")}</div>
+                                          )}
+                                        </>
+                                      );
+                                    })()}
+                                    {(() => {
+                                      const evPlates = dedup(filterByProfile(company.personal_plates, profile?.plate, matchesPlate).map(normalizePlate)).slice(0, 2);
+                                      return evPlates.length > 0 ? (
+                                        <div><span className="text-muted-foreground">Patente: </span>{evPlates.join(", ")}</div>
+                                      ) : null;
+                                    })()}
                                   </div>
                                 </div>
                               )}
@@ -1017,24 +1288,32 @@ export default function VistaConsolidada() {
                                         <span>Compra detectada</span>
                                       </div>
                                     )}
-                                    {company.confirmed_data.map(d => (
-                                      <div key={d.tipo_key}>
-                                        <span className="text-muted-foreground">
-                                          <KeyRound className="mr-0.5 inline h-3 w-3 text-emerald-500" />
-                                          {d.tipo}:{" "}
-                                        </span>
-                                        <strong>{d.valores.slice(0, 2).join(", ")}</strong>
-                                      </div>
-                                    ))}
-                                    {company.autofill_hints.map(d => (
-                                      <div key={d.tipo_key}>
-                                        <span className="text-muted-foreground">
-                                          <CheckCircle2 className="mr-0.5 inline h-3 w-3 text-blue-400" />
-                                          {d.tipo}:{" "}
-                                        </span>
-                                        {d.valores.slice(0, 2).join(", ")}
-                                      </div>
-                                    ))}
+                                    {company.confirmed_data.map(d => {
+                                      const vals = filterAutofillValues(d.tipo_key, d.valores, profile).slice(0, 2);
+                                      if (vals.length === 0) return null;
+                                      return (
+                                        <div key={d.tipo_key}>
+                                          <span className="text-muted-foreground">
+                                            <KeyRound className="mr-0.5 inline h-3 w-3 text-emerald-500" />
+                                            {d.tipo}:{" "}
+                                          </span>
+                                          <strong>{vals.join(", ")}</strong>
+                                        </div>
+                                      );
+                                    })}
+                                    {company.autofill_hints.map(d => {
+                                      const vals = filterAutofillValues(d.tipo_key, d.valores, profile).slice(0, 2);
+                                      if (vals.length === 0) return null;
+                                      return (
+                                        <div key={d.tipo_key}>
+                                          <span className="text-muted-foreground">
+                                            <CheckCircle2 className="mr-0.5 inline h-3 w-3 text-blue-400" />
+                                            {d.tipo}:{" "}
+                                          </span>
+                                          {vals.join(", ")}
+                                        </div>
+                                      );
+                                    })}
                                     {company.probable_data_types.length > 0 && (
                                       <div className="flex flex-wrap gap-1 pt-1">
                                         {company.probable_data_types.slice(0, 4).map(t => (
@@ -1052,21 +1331,19 @@ export default function VistaConsolidada() {
                               const domKey  = normalizeDomainKey(company.primary_domain);
                               const inCl    = clDomains.has(domKey);
                               const entry   = hibpCache.get(domKey);
-                              const hibpChecked = entry !== undefined;
                               const inHibp  = entry?.hibpBreach ?? false;
 
-                              // Nada que mostrar si no hay datos de ninguna fuente
-                              if (!inCl && !hibpChecked) return null;
+                              // Solo se muestra si la empresa SÍ aparece en alguna
+                              // filtración (Chile o HIBP). Las verificadas sin
+                              // filtración no muestran nada.
+                              if (!inCl && !inHibp) return null;
 
-                              const hasAlert = inCl || inHibp;
                               return (
-                                <div className={`rounded-2xl border p-4 space-y-2 ${hasAlert ? "border-red-500/20 bg-red-500/5" : "border-emerald-500/20 bg-emerald-500/5"}`}>
+                                <div className="rounded-2xl border border-red-500/20 bg-red-500/5 p-4 space-y-2">
                                   <div className="flex items-center gap-2">
-                                    {hasAlert
-                                      ? <ShieldOff className="h-4 w-4 text-red-500" />
-                                      : <ShieldCheck className="h-4 w-4 text-emerald-500" />}
-                                    <span className={`text-xs font-semibold uppercase tracking-wider ${hasAlert ? "text-red-600 dark:text-red-400" : "text-emerald-600 dark:text-emerald-400"}`}>
-                                      {hasAlert ? "Filtraciones conocidas" : "Sin filtraciones detectadas"}
+                                    <ShieldOff className="h-4 w-4 text-red-500" />
+                                    <span className="text-xs font-semibold uppercase tracking-wider text-red-600 dark:text-red-400">
+                                      Filtraciones conocidas
                                     </span>
                                   </div>
                                   <div className="flex flex-wrap gap-2">
@@ -1076,21 +1353,14 @@ export default function VistaConsolidada() {
                                         Lista filtraciones Chile
                                       </Badge>
                                     )}
-                                    {hibpChecked && (
-                                      inHibp ? (
-                                        <Badge className="bg-red-600 text-white text-xs">
-                                          <ShieldOff className="mr-1 h-3 w-3" />
-                                          Have I Been Pwned — filtrado
-                                        </Badge>
-                                      ) : (
-                                        <Badge className="bg-emerald-700 text-white text-xs">
-                                          <ShieldCheck className="mr-1 h-3 w-3" />
-                                          Have I Been Pwned — sin filtración
-                                        </Badge>
-                                      )
+                                    {inHibp && (
+                                      <Badge className="bg-red-600 text-white text-xs">
+                                        <ShieldOff className="mr-1 h-3 w-3" />
+                                        Have I Been Pwned — filtrado
+                                      </Badge>
                                     )}
                                   </div>
-                                  {entry?.breachNames && entry.breachNames.length > 0 && (
+                                  {inHibp && entry?.breachNames && entry.breachNames.length > 0 && (
                                     <div className="text-xs text-muted-foreground">
                                       <span className="font-medium text-foreground/70">Incidentes HIBP: </span>
                                       {entry.breachNames.slice(0, 5).join(", ")}
@@ -1098,9 +1368,7 @@ export default function VistaConsolidada() {
                                     </div>
                                   )}
                                   <p className="text-xs text-muted-foreground leading-relaxed">
-                                    {hasAlert
-                                      ? "Esta empresa ha sido identificada en una o más filtraciones de datos. Considera solicitar la baja de tus datos."
-                                      : "Esta empresa fue verificada en HIBP y no aparece en ninguna filtración conocida."}
+                                    Esta empresa ha sido identificada en una o más filtraciones de datos. Considera solicitar la baja de tus datos.
                                   </p>
                                 </div>
                               );

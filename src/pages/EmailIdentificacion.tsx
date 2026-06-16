@@ -9,6 +9,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
 import { Building2, Link2, Loader2, Mail, ShieldAlert, Telescope, Unlink2, UserRound } from "lucide-react";
 import { useNavigate } from "react-router-dom";
+import { runEmailFootprint, saveEmailResult } from "@/lib/analysis";
 
 type ProviderMode = "manual" | "gmail";
 type SummarySignalType = "name" | "address" | "rut" | "phone" | "plate";
@@ -142,7 +143,7 @@ const sampleMessages = JSON.stringify(
   2,
 );
 
-const READ_ALL_MESSAGES_LIMIT = "5000";
+const READ_ALL_MESSAGES_LIMIT = "25000";
 
 function riskVariant(level: "low" | "medium" | "high") {
   if (level === "high") return "destructive";
@@ -429,6 +430,7 @@ export default function EmailIdentificacion() {
   const [messagesJson, setMessagesJson] = useState(sampleMessages);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [progressMsg, setProgressMsg] = useState<string | null>(null);
   const [result, setResult] = useState<EmailIdentificationResponse | null>(null);
   const [selectedSummarySignal, setSelectedSummarySignal] = useState<SummarySignalType>("name");
   const [draftError, setDraftError] = useState<string | null>(null);
@@ -480,6 +482,19 @@ export default function EmailIdentificacion() {
     };
   }, []);
 
+  // Restaurar el último resultado guardado (p. ej. analizado desde el Inicio),
+  // para que al entrar a esta vista se vea sin tener que volver a analizar.
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem("email_footprint_result");
+      if (raw) {
+        setResult(JSON.parse(raw) as EmailIdentificationResponse);
+        const holder = localStorage.getItem("email_footprint_holder");
+        if (holder && !emailAddress) setEmailAddress(holder);
+      }
+    } catch { /* ignore */ }
+  }, []);  // eslint-disable-line react-hooks/exhaustive-deps
+
   useEffect(() => {
     const handleMessage = (event: MessageEvent) => {
       const allowedOrigins = new Set(
@@ -526,75 +541,51 @@ export default function EmailIdentificacion() {
     setLoading(true);
     setError(null);
     setResult(null);
+    setProgressMsg(null);
 
     try {
-      const payload: Record<string, unknown> = {
-        provider,
-        email_address: emailAddress.trim() || undefined,
-        max_messages: Number(maxMessages) || 150,
-      };
       const normalizedTargets = Object.fromEntries(
         Object.entries(searchTargets)
           .map(([key, value]) => [key, value.trim()])
           .filter(([, value]) => Boolean(value)),
-      );
-      if (Object.keys(normalizedTargets).length > 0) {
-        payload.search_targets = normalizedTargets;
-      }
+      ) as Record<string, string>;
+
+      let data: EmailIdentificationResponse;
 
       if (provider === "gmail") {
         if (!gmailAuth?.access_token) throw new Error("Conecta Gmail primero.");
-        payload.gmail_access_token = gmailAuth.access_token;
+        // Trabajo en segundo plano con sondeo: no expira aunque el buzón sea grande.
+        data = await runEmailFootprint(gmailAuth.access_token, {
+          maxMessages: Number(maxMessages) || 150,
+          searchTargets: normalizedTargets,
+          onProgress: (processed, total) =>
+            setProgressMsg(`Analizando correos… ${processed.toLocaleString()} de ${total.toLocaleString()}`),
+        });
       } else {
-        payload.messages = JSON.parse(messagesJson);
+        // Mensajes manuales (pruebas): el endpoint síncrono es suficiente.
+        const payload: Record<string, unknown> = {
+          provider,
+          email_address: emailAddress.trim() || undefined,
+          max_messages: Number(maxMessages) || 150,
+          messages: JSON.parse(messagesJson),
+        };
+        if (Object.keys(normalizedTargets).length > 0) payload.search_targets = normalizedTargets;
+        const res = await fetch("/api/identification/email-footprint", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+        data = await res.json();
+        if (!res.ok) throw new Error((data as any).detail ?? `HTTP ${res.status}`);
       }
 
-      const res = await fetch("/api/identification/email-footprint", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-        signal: AbortSignal.timeout(600_000),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.detail ?? `HTTP ${res.status}`);
       setResult(data);
-
-      // Guardar dominios + perfiles en localStorage para que Filtraciones los cargue automáticamente
-      try {
-        const senders: Array<{
-          primary_domain: string;
-          personal_data_types: string[];
-          sender_type: string;
-          sample_subjects: string[];
-        }> = (data.senders ?? [])
-          .filter((s: { primary_domain?: string }) => Boolean(s.primary_domain))
-          .map((s: {
-            primary_domain: string;
-            personal_data_types?: string[];
-            sender_type?: string;
-            evidence?: { sample_subjects?: string[] };
-          }) => ({
-            primary_domain:      s.primary_domain,
-            personal_data_types: s.personal_data_types ?? [],
-            sender_type:         s.sender_type ?? "",
-            sample_subjects:     s.evidence?.sample_subjects?.slice(0, 3) ?? [],
-          }));
-
-        const domains = senders.map(s => s.primary_domain);
-        localStorage.setItem("email_footprint_result", JSON.stringify(data));
-        localStorage.setItem("email_footprint_holder", data.email_address ?? emailAddress ?? "");
-        if (domains.length > 0) {
-          localStorage.setItem("email_crossref_domains", JSON.stringify(domains));
-          localStorage.setItem("email_crossref_senders", JSON.stringify(senders));
-          localStorage.setItem("email_crossref_ts", new Date().toISOString());
-        }
-      } catch {
-        // localStorage no disponible — no crítico
-      }
+      saveEmailResult(data, emailAddress);
     } catch (err) {
       setError(err instanceof Error ? err.message : "No se pudo analizar.");
     } finally {
       setLoading(false);
+      setProgressMsg(null);
     }
   };
 
@@ -1008,8 +999,14 @@ export default function EmailIdentificacion() {
 
               <Button onClick={handleAnalyze} disabled={loading || !canAnalyze} className="h-14 w-full bg-emerald-500 text-base text-white hover:bg-emerald-600">
                 {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Mail className="h-4 w-4" />}
-                Analizar correos
+                {loading ? (progressMsg ?? "Analizando…") : "Analizar correos"}
               </Button>
+
+              {loading && (
+                <div className="text-center text-xs text-muted-foreground">
+                  Mantén esta ventana abierta mientras se completa; puede tardar varios minutos en buzones grandes.
+                </div>
+              )}
 
               {!canAnalyze && (
                 <div className="text-center text-xs text-muted-foreground">
@@ -1097,6 +1094,11 @@ export default function EmailIdentificacion() {
                             <Badge variant={riskVariant(sender.risk.level)}>{sender.risk.level}</Badge>
                             <Badge variant="secondary" className="bg-emerald-500 text-white hover:bg-emerald-500/90">conf. {confidenceLabel(sender.personal_data_confidence)}</Badge>
                             <Badge variant="outline">{sender.evidence?.message_count ?? 0} correos</Badge>
+                            {(sender.evidence?.spam_count ?? 0) > 0 && (
+                              <Badge className="bg-orange-500 text-white hover:bg-orange-500/90">
+                                En spam{(sender.evidence?.spam_count ?? 0) > 1 ? ` (${sender.evidence?.spam_count})` : ""}
+                              </Badge>
+                            )}
                             {sender.matched_targets && sender.matched_targets.length > 0 && (
                               <Badge className="bg-amber-500 text-white hover:bg-amber-500/90">
                                 ✓ Coincide con objetivo

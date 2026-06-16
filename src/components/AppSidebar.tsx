@@ -1,6 +1,5 @@
-import { useParams, useLocation } from "react-router-dom";
 import {
-  Fingerprint, Home, BarChart3, FileSearch, ClipboardCheck, Search, MailSearch, Network, Telescope, ShieldOff, Chrome, DatabaseZap, LayoutDashboard,
+  Fingerprint, Home, MailSearch, Chrome, LayoutDashboard, DatabaseZap, ShieldOff,
 } from "lucide-react";
 import { NavLink } from "@/components/NavLink";
 import {
@@ -16,19 +15,20 @@ import {
   useSidebar,
 } from "@/components/ui/sidebar";
 
+// Navegación alineada al flujo del producto: inicio guiado → identificar fuentes
+// (correo y navegación) → consolidar y dimensionar riesgo → accionar (bajas).
+const NAV_ITEMS = [
+  { to: "/",                   label: "Inicio",            icon: Home,            end: true },
+  { to: "/identificacion-email", label: "Análisis de correo", icon: MailSearch },
+  { to: "/historial-browser",  label: "Análisis de navegación", icon: Chrome },
+  { to: "/consolidado",        label: "Vista consolidada", icon: LayoutDashboard },
+  { to: "/filtraciones",       label: "Filtraciones",      icon: DatabaseZap },
+  { to: "/baja-historial",     label: "Solicitudes de baja", icon: ShieldOff },
+];
+
 export function AppSidebar() {
   const { state } = useSidebar();
   const collapsed = state === "collapsed";
-  const { id } = useParams();
-  const location = useLocation();
-
-  const activeId = id || location.pathname.match(/\/(resultados|hallazgos|plan)\/(\w+)/)?.[2];
-  const dorksNombre = new URLSearchParams(location.search).get("nombre") ?? "";
-
-  const subPages = [
-    { title: "Hallazgos",      base: "hallazgos",  icon: FileSearch },
-    { title: "Plan de Acción", base: "plan",        icon: ClipboardCheck },
-  ];
 
   return (
     <Sidebar collapsible="icon">
@@ -49,126 +49,24 @@ export function AppSidebar() {
           <SidebarGroupLabel>General</SidebarGroupLabel>
           <SidebarGroupContent>
             <SidebarMenu>
-              <SidebarMenuItem>
-                <SidebarMenuButton asChild>
-                  <NavLink to="/" end className="hover:bg-muted/50" activeClassName="bg-primary/10 text-primary font-medium">
-                    <Home className="mr-2 h-4 w-4" />
-                    {!collapsed && <span>Inicio</span>}
-                  </NavLink>
-                </SidebarMenuButton>
-              </SidebarMenuItem>
-
-              <SidebarMenuItem>
-                <SidebarMenuButton asChild>
-                  <NavLink to="/resultados" end className="hover:bg-muted/50" activeClassName="bg-primary/10 text-primary font-medium">
-                    <BarChart3 className="mr-2 h-4 w-4" />
-                    {!collapsed && <span>Resultados</span>}
-                  </NavLink>
-                </SidebarMenuButton>
-              </SidebarMenuItem>
-
-              <SidebarMenuItem>
-                <SidebarMenuButton asChild>
-                  <NavLink to="/identificacion-email" className="hover:bg-muted/50" activeClassName="bg-primary/10 text-primary font-medium">
-                    <MailSearch className="mr-2 h-4 w-4" />
-                    {!collapsed && <span>Identificación</span>}
-                  </NavLink>
-                </SidebarMenuButton>
-              </SidebarMenuItem>
-
-              <SidebarMenuItem>
-                <SidebarMenuButton asChild>
-                  <NavLink to="/consolidado" className="hover:bg-muted/50" activeClassName="bg-primary/10 text-primary font-medium">
-                    <LayoutDashboard className="mr-2 h-4 w-4" />
-                    {!collapsed && <span>Vista Consolidada</span>}
-                  </NavLink>
-                </SidebarMenuButton>
-              </SidebarMenuItem>
-
-              <SidebarMenuItem>
-                <SidebarMenuButton asChild>
-                  <NavLink to="/historial-browser" className="hover:bg-muted/50" activeClassName="bg-primary/10 text-primary font-medium">
-                    <Chrome className="mr-2 h-4 w-4" />
-                    {!collapsed && <span>Historial Chrome</span>}
-                  </NavLink>
-                </SidebarMenuButton>
-              </SidebarMenuItem>
-
-              <SidebarMenuItem>
-                <SidebarMenuButton asChild>
-                  <NavLink to="/filtraciones" className="hover:bg-muted/50" activeClassName="bg-primary/10 text-primary font-medium">
-                    <DatabaseZap className="mr-2 h-4 w-4" />
-                    {!collapsed && <span>Filtraciones</span>}
-                  </NavLink>
-                </SidebarMenuButton>
-              </SidebarMenuItem>
-
-              <SidebarMenuItem>
-                <SidebarMenuButton asChild>
-                  <NavLink to="/baja-historial" className="hover:bg-muted/50" activeClassName="bg-primary/10 text-primary font-medium">
-                    <ShieldOff className="mr-2 h-4 w-4" />
-                    {!collapsed && <span>Historial de Bajas</span>}
-                  </NavLink>
-                </SidebarMenuButton>
-              </SidebarMenuItem>
-
-              <SidebarMenuItem>
-                <SidebarMenuButton asChild>
-                  <NavLink to="/cabeceras-empresa-temp" className="hover:bg-muted/50" activeClassName="bg-primary/10 text-primary font-medium">
-                    <Network className="mr-2 h-4 w-4" />
-                    {!collapsed && <span>Cabeceras (Temp)</span>}
-                  </NavLink>
-                </SidebarMenuButton>
-              </SidebarMenuItem>
-
-              <SidebarMenuItem>
-                <SidebarMenuButton asChild>
-                  <NavLink to="/exposicion-web-temp" className="hover:bg-muted/50" activeClassName="bg-primary/10 text-primary font-medium">
-                    <Telescope className="mr-2 h-4 w-4" />
-                    {!collapsed && <span>Exposición Web (Temp)</span>}
-                  </NavLink>
-                </SidebarMenuButton>
-              </SidebarMenuItem>
-
-              <SidebarMenuItem>
-                <SidebarMenuButton asChild>
-                  <NavLink
-                    to={dorksNombre ? `/dorks?nombre=${encodeURIComponent(dorksNombre)}` : "/dorks"}
-                    className="hover:bg-muted/50"
-                    activeClassName="bg-primary/10 text-primary font-medium"
-                  >
-                    <Search className="mr-2 h-4 w-4" />
-                    {!collapsed && <span>Dorks</span>}
-                  </NavLink>
-                </SidebarMenuButton>
-              </SidebarMenuItem>
+              {NAV_ITEMS.map((item) => (
+                <SidebarMenuItem key={item.to}>
+                  <SidebarMenuButton asChild>
+                    <NavLink
+                      to={item.to}
+                      end={item.end}
+                      className="hover:bg-muted/50"
+                      activeClassName="bg-primary/10 text-primary font-medium"
+                    >
+                      <item.icon className="mr-2 h-4 w-4" />
+                      {!collapsed && <span>{item.label}</span>}
+                    </NavLink>
+                  </SidebarMenuButton>
+                </SidebarMenuItem>
+              ))}
             </SidebarMenu>
           </SidebarGroupContent>
         </SidebarGroup>
-
-        {activeId && (
-          <SidebarGroup>
-            <SidebarGroupLabel>Análisis</SidebarGroupLabel>
-            <SidebarGroupContent>
-              <SidebarMenu>
-                {subPages.map((item) => (
-                  <SidebarMenuItem key={item.title}>
-                    <SidebarMenuButton asChild>
-                      <NavLink
-                        to={`/${item.base}/${activeId}`}
-                        className="hover:bg-muted/50"
-                        activeClassName="bg-primary/10 text-primary font-medium"
-                      >
-                        <item.icon className="mr-2 h-4 w-4" />
-                        {!collapsed && <span>{item.title}</span>}
-                      </NavLink>
-                    </SidebarMenuButton>
-                  </SidebarMenuItem>
-                ))}
-              </SidebarMenu>
-            </SidebarGroupContent>
-          </SidebarGroup>
-        )}
       </SidebarContent>
     </Sidebar>
   );
