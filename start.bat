@@ -98,8 +98,10 @@ REM ===========================================================================
 
 :ensure_python
 REM Devuelve %PY% con el comando de Python. errorlevel 1 si hay que reabrir.
-where py >nul 2>&1 && ( set "PY=py" & exit /b 0 )
-where python >nul 2>&1 && ( set "PY=python" & exit /b 0 )
+REM Usa "--version" (no "where") a proposito: asi ignora el stub falso de la
+REM Microsoft Store (python.exe que solo dice "Python was not found").
+py --version >nul 2>&1 && ( set "PY=py" & exit /b 0 )
+python --version >nul 2>&1 && ( set "PY=python" & exit /b 0 )
 echo.
 echo ^>^>^> Python no encontrado. Instalando version x64 (compatible con ARM)...
 where winget >nul 2>&1
@@ -109,8 +111,8 @@ if not errorlevel 1 (
     call :download_python
 )
 call :refresh_path
-where py >nul 2>&1 && ( set "PY=py" & exit /b 0 )
-where python >nul 2>&1 && ( set "PY=python" & exit /b 0 )
+py --version >nul 2>&1 && ( set "PY=py" & exit /b 0 )
+python --version >nul 2>&1 && ( set "PY=python" & exit /b 0 )
 echo.
 echo *** Python se instalo, pero hay que reabrir la consola para usarlo. ***
 echo     Cierra esta ventana y vuelve a hacer doble clic en start.bat
