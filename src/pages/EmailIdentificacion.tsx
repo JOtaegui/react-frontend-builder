@@ -558,8 +558,14 @@ export default function EmailIdentificacion() {
         data = await runEmailFootprint(gmailAuth.access_token, {
           maxMessages: Number(maxMessages) || 150,
           searchTargets: normalizedTargets,
-          onProgress: (processed, total) =>
-            setProgressMsg(`Analizando correos… ${processed.toLocaleString()} de ${total.toLocaleString()}`),
+          onProgress: (processed, total, stage) => {
+            const label = stage || "Analizando correos";
+            setProgressMsg(
+              total > 1
+                ? `${label}… ${processed.toLocaleString()} de ${total.toLocaleString()}`
+                : `${label}…`,
+            );
+          },
         });
       } else {
         // Mensajes manuales (pruebas): el endpoint síncrono es suficiente.

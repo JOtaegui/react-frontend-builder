@@ -216,9 +216,11 @@ def _prune_email_jobs() -> None:
 async def _run_email_job(job_id: str, request: EmailIdentificationRequest) -> None:
     state = _EMAIL_JOBS[job_id]
 
-    def cb(done: int, total: int) -> None:
+    def cb(done: int, total: int, stage: str = "") -> None:
         state["processed"] = done
         state["total"] = total
+        if stage:
+            state["stage"] = stage
 
     try:
         result = await _perform_email_identification(request, progress_cb=cb)
@@ -239,7 +241,7 @@ async def email_identification_start(request: EmailIdentificationRequest):
     """Inicia el análisis en segundo plano y devuelve un job_id para sondear."""
     import uuid as _uuid
     job_id = _uuid.uuid4().hex
-    _EMAIL_JOBS[job_id] = {"status": "running", "processed": 0, "total": 0, "result": None, "error": None}
+    _EMAIL_JOBS[job_id] = {"status": "running", "processed": 0, "total": 0, "stage": "Iniciando…", "result": None, "error": None}
     _prune_email_jobs()
     asyncio.create_task(_run_email_job(job_id, request))
     return {"job_id": job_id}
@@ -255,6 +257,7 @@ async def email_identification_status(job_id: str):
         "status":    state["status"],
         "processed": state["processed"],
         "total":     state["total"],
+        "stage":     state.get("stage", ""),
         "error":     state["error"],
         "result":    state["result"] if state["status"] == "done" else None,
     }

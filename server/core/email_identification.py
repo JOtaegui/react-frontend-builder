@@ -243,7 +243,7 @@ class SenderAggregate:
 
 async def identify_email_footprint(
     request: EmailIdentificationRequest,
-    progress_cb: Optional[Callable[[int, int], None]] = None,
+    progress_cb: Optional[Callable[..., None]] = None,
 ) -> EmailIdentificationResponse:
     messages = list(request.messages)
     if request.provider == "gmail":
@@ -297,6 +297,8 @@ async def identify_email_footprint(
         if record.suspected_data_broker:
             data_brokers.add(record.company_name)
 
+    if progress_cb:
+        progress_cb(0, 0, "Finalizando análisis (dominios, ubicación, datos personales)")
     await _enrich_with_whois(aggregates)
     await enrich_senders_with_header_ip_country(aggregates)
     await _enrich_with_llm_personal_data(aggregates)
@@ -336,10 +338,43 @@ async def identify_email_footprint(
     )
 
 
+async def _gmail_get_with_retries(
+    client: httpx.AsyncClient,
+    url: str,
+    *,
+    params: Any,
+    attempts: int = 3,
+) -> httpx.Response:
+    """GET a la API de Gmail tolerante a fallos transitorios.
+
+    Reintenta ante timeouts, errores de red y respuestas 429/5xx (con backoff
+    corto y respetando Retry-After). En equipos lentos (VM x64 emulada sobre
+    ARM, red con latencia) esto evita que se pierdan correos en silencio, que
+    era lo que reducía el número de fuentes por dato. Los 4xx no se reintentan.
+    """
+    for attempt in range(attempts):
+        last = attempt == attempts - 1
+        try:
+            r = await client.get(url, params=params)
+        except (httpx.TimeoutException, httpx.TransportError):
+            if last:
+                raise
+            await asyncio.sleep(0.5 * (2 ** attempt))
+            continue
+        if (r.status_code == 429 or r.status_code >= 500) and not last:
+            retry_after = r.headers.get("Retry-After", "")
+            delay = float(retry_after) if retry_after.isdigit() else 0.5 * (2 ** attempt)
+            await asyncio.sleep(min(delay, 8.0))
+            continue
+        r.raise_for_status()
+        return r
+    raise httpx.HTTPError("Gmail API: reintentos agotados")
+
+
 async def _fetch_gmail_messages(
     access_token: str,
     max_messages: int,
-    progress_cb: Optional[Callable[[int, int], None]] = None,
+    progress_cb: Optional[Callable[..., None]] = None,
 ) -> list[AuthorizedEmailMessage]:
     """
     Estrategia de dos fases optimizada para máxima detección de datos personales:
@@ -362,8 +397,11 @@ async def _fetch_gmail_messages(
     from collections import defaultdict
 
     api_headers = {"Authorization": f"Bearer {access_token}"}
-    timeout_meta = httpx.Timeout(12.0, connect=6.0)
-    timeout_full = httpx.Timeout(20.0, connect=8.0)
+    # Timeouts holgados + reintentos (_gmail_get_with_retries) para no descartar
+    # correos en equipos lentos (VM x64 emulada sobre ARM): antes los timeouts
+    # cortos perdían mensajes en silencio y bajaban las fuentes por dato.
+    timeout_meta = httpx.Timeout(20.0, connect=8.0)
+    timeout_full = httpx.Timeout(30.0, connect=10.0)
 
     # ── Fase 1: metadata para todos los mensajes ──────────────────────────────
     async with httpx.AsyncClient(timeout=timeout_meta, headers=api_headers) as client:
@@ -371,7 +409,8 @@ async def _fetch_gmail_messages(
         next_page_token: str | None = None
 
         while len(message_refs) < max_messages:
-            listing = await client.get(
+            listing = await _gmail_get_with_retries(
+                client,
                 f"{GMAIL_API_BASE}/messages",
                 params={
                     "maxResults": min(max_messages - len(message_refs), 500),
@@ -379,7 +418,6 @@ async def _fetch_gmail_messages(
                     **({"pageToken": next_page_token} if next_page_token else {}),
                 },
             )
-            listing.raise_for_status()
             data = listing.json()
             message_refs.extend(data.get("messages", []) or [])
             next_page_token = data.get("nextPageToken")
@@ -390,7 +428,7 @@ async def _fetch_gmail_messages(
         sem_meta = asyncio.Semaphore(SEM_META)
         total_refs = len(selected_refs)
         if progress_cb:
-            progress_cb(0, total_refs)
+            progress_cb(0, total_refs, "Leyendo correos")
 
         async def fetch_meta(ref: dict[str, Any]) -> tuple[str, AuthorizedEmailMessage | None]:
             msg_id = ref.get("id", "")
@@ -400,7 +438,8 @@ async def _fetch_gmail_messages(
                 try:
                     # metadataHeaders debe pasarse como lista para que httpx
                     # los serialice como repeated params (?metadataHeaders=From&metadataHeaders=To…)
-                    r = await client.get(
+                    r = await _gmail_get_with_retries(
+                        client,
                         f"{GMAIL_API_BASE}/messages/{msg_id}",
                         params=[
                             ("format",          "metadata"),
@@ -412,7 +451,6 @@ async def _fetch_gmail_messages(
                             ("metadataHeaders", "Return-Path"),
                         ],
                     )
-                    r.raise_for_status()
                     return msg_id, _gmail_to_authorized_message(r.json())
                 except Exception:
                     return msg_id, None
@@ -425,7 +463,7 @@ async def _fetch_gmail_messages(
             chunk = selected_refs[start:start + META_BATCH]
             meta_results.extend(await asyncio.gather(*(fetch_meta(ref) for ref in chunk)))
             if progress_cb:
-                progress_cb(min(start + META_BATCH, total_refs), total_refs)
+                progress_cb(min(start + META_BATCH, total_refs), total_refs, "Leyendo correos")
 
     # Índice id → (mensaje_meta, posición_en_lista)
     meta_by_id: dict[str, AuthorizedEmailMessage] = {}
@@ -488,16 +526,27 @@ async def _fetch_gmail_messages(
             async def fetch_full(msg_id: str) -> tuple[str, AuthorizedEmailMessage | None]:
                 async with sem_full:
                     try:
-                        r = await client.get(
+                        r = await _gmail_get_with_retries(
+                            client,
                             f"{GMAIL_API_BASE}/messages/{msg_id}",
                             params={"format": "full"},
                         )
-                        r.raise_for_status()
                         return msg_id, _gmail_to_authorized_message(r.json())
                     except Exception:
                         return msg_id, None
 
-            full_results = await asyncio.gather(*(fetch_full(mid) for mid in full_ids))
+            # En lotes para reportar avance ("Revisando remitentes X de Y") en
+            # vez de dejar la barra congelada mientras se descargan los cuerpos.
+            FULL_BATCH = 200
+            total_full = len(full_ids)
+            full_results: list[tuple[str, AuthorizedEmailMessage | None]] = []
+            if progress_cb:
+                progress_cb(0, total_full, "Revisando remitentes")
+            for fstart in range(0, total_full, FULL_BATCH):
+                fchunk = full_ids[fstart:fstart + FULL_BATCH]
+                full_results.extend(await asyncio.gather(*(fetch_full(mid) for mid in fchunk)))
+                if progress_cb:
+                    progress_cb(min(fstart + FULL_BATCH, total_full), total_full, "Revisando remitentes")
 
         for msg_id, msg in full_results:
             if msg is not None:

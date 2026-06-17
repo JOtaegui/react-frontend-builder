@@ -4,10 +4,13 @@ import { Layout } from "@/components/Layout";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Dialog, DialogClose, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import {
   Fingerprint, Mail, Chrome, LayoutDashboard, ShieldCheck, CheckCircle2,
-  Lock, Eye, Search, ArrowRight, Loader2, AlertTriangle,
+  Lock, Eye, Search, ArrowRight, Loader2, AlertTriangle, Target,
 } from "lucide-react";
 import {
   LS_EMAIL_RESULT, LS_BROWSER_RESULT,
@@ -43,6 +46,14 @@ export default function Inicio() {
   // Estado del paso de correo
   const [emailPhase, setEmailPhase] = useState<Phase>("idle");
   const [emailMsg, setEmailMsg]     = useState<string>("");
+
+  // Datos de búsqueda opcionales para afinar el análisis de correo
+  const [searchTargets, setSearchTargets] = useState({
+    nombre: "", rut: "", direccion: "", telefono: "", patente: "",
+  });
+  const updateTarget = (field: keyof typeof searchTargets, value: string) =>
+    setSearchTargets((prev) => ({ ...prev, [field]: value }));
+  const filledTargets = Object.values(searchTargets).filter((v) => v.trim()).length;
 
   // Estado del paso de navegación
   const [browser, setBrowser]         = useState("chrome");
@@ -80,9 +91,20 @@ export default function Inicio() {
       const auth = await connectGmailPopup();
       setEmailPhase("running");
       setEmailMsg("Analizando tus correos… esto puede tardar varios minutos.");
+      const normalizedTargets = Object.fromEntries(
+        Object.entries(searchTargets)
+          .map(([key, value]) => [key, value.trim()])
+          .filter(([, value]) => Boolean(value)),
+      ) as Record<string, string>;
       const data = await runEmailFootprint(auth.access_token, {
-        onProgress: (processed, total) => {
-          setEmailMsg(`Analizando correos… ${processed.toLocaleString()} de ${total.toLocaleString()}`);
+        searchTargets: normalizedTargets,
+        onProgress: (processed, total, stage) => {
+          const label = stage || "Analizando correos";
+          setEmailMsg(
+            total > 1
+              ? `${label}… ${processed.toLocaleString()} de ${total.toLocaleString()}`
+              : `${label}…`,
+          );
         },
       });
       saveEmailResult(data, auth.email_address ?? "");
@@ -172,6 +194,55 @@ export default function Inicio() {
                   Conecta tu Gmail y analizamos todos tus mensajes para identificar qué empresas te
                   escriben y qué datos personales tuyos manejan.
                 </p>
+                <Dialog>
+                  <DialogTrigger asChild>
+                    <Button type="button" variant="outline" size="sm" className="mt-2 h-8 gap-1.5 text-xs">
+                      <Target className="h-3.5 w-3.5 text-emerald-500" />
+                      Datos de búsqueda (opcional)
+                      {filledTargets > 0 && (
+                        <Badge className="ml-0.5 bg-emerald-500 px-1.5 text-[10px] text-white hover:bg-emerald-500/90">
+                          {filledTargets}
+                        </Badge>
+                      )}
+                    </Button>
+                  </DialogTrigger>
+                  <DialogContent className="sm:max-w-md">
+                    <DialogHeader>
+                      <DialogTitle>Datos de búsqueda</DialogTitle>
+                      <DialogDescription>
+                        Opcional. Si los completas, el análisis prioriza las coincidencias de tu nombre,
+                        RUT, dirección, teléfono o patente dentro de los correos.
+                      </DialogDescription>
+                    </DialogHeader>
+                    <div className="grid gap-3 py-2">
+                      <div className="space-y-1.5">
+                        <Label htmlFor="homeNombre" className="text-xs text-muted-foreground">Nombre</Label>
+                        <Input id="homeNombre" value={searchTargets.nombre} onChange={(e) => updateTarget("nombre", e.target.value)} placeholder="Nombre Apellido" className="h-10 text-sm" />
+                      </div>
+                      <div className="space-y-1.5">
+                        <Label htmlFor="homeRut" className="text-xs text-muted-foreground">RUT</Label>
+                        <Input id="homeRut" value={searchTargets.rut} onChange={(e) => updateTarget("rut", e.target.value)} placeholder="12.345.678-9" className="h-10 text-sm" />
+                      </div>
+                      <div className="space-y-1.5">
+                        <Label htmlFor="homeDireccion" className="text-xs text-muted-foreground">Dirección</Label>
+                        <Input id="homeDireccion" value={searchTargets.direccion} onChange={(e) => updateTarget("direccion", e.target.value)} placeholder="Av. Apoquindo 4501, Las Condes" className="h-10 text-sm" />
+                      </div>
+                      <div className="space-y-1.5">
+                        <Label htmlFor="homeTelefono" className="text-xs text-muted-foreground">Teléfono</Label>
+                        <Input id="homeTelefono" value={searchTargets.telefono} onChange={(e) => updateTarget("telefono", e.target.value)} placeholder="+56 9 1234 5678" className="h-10 text-sm" />
+                      </div>
+                      <div className="space-y-1.5">
+                        <Label htmlFor="homePatente" className="text-xs text-muted-foreground">Patente</Label>
+                        <Input id="homePatente" value={searchTargets.patente} onChange={(e) => updateTarget("patente", e.target.value.toUpperCase())} placeholder="ABCD12" className="h-10 text-sm" />
+                      </div>
+                    </div>
+                    <DialogFooter>
+                      <DialogClose asChild>
+                        <Button type="button" className="w-full bg-emerald-500 text-white hover:bg-emerald-600">Listo</Button>
+                      </DialogClose>
+                    </DialogFooter>
+                  </DialogContent>
+                </Dialog>
                 {statusRow(emailPhase, emailMsg)}
               </div>
               <Button onClick={handleEmail} disabled={emailBusy} className="shrink-0 gap-1.5">

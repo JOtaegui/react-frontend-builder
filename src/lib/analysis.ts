@@ -78,7 +78,7 @@ export function connectGmailPopup(): Promise<GmailPayload> {
 // trabajo sigue corriendo en el servidor aunque el usuario cambie de vista.
 export interface EmailJobOptions {
   maxMessages?: number;
-  onProgress?: (processed: number, total: number) => void;
+  onProgress?: (processed: number, total: number, stage?: string) => void;
   searchTargets?: Record<string, string>;
   pollMs?: number;
 }
@@ -113,7 +113,7 @@ export async function runEmailFootprint(
     const sRes = await fetch(`/api/identification/email-footprint/status?job_id=${encodeURIComponent(jobId)}`);
     const s = await sRes.json();
     if (!sRes.ok) throw new Error(s.detail ?? `HTTP ${sRes.status}`);
-    if (onProgress && s.total) onProgress(s.processed ?? 0, s.total);
+    if (onProgress && (s.total || s.stage)) onProgress(s.processed ?? 0, s.total ?? 0, s.stage ?? "");
     if (s.status === "done") return s.result;
     if (s.status === "error") throw new Error(s.error ?? "No se pudo completar el análisis.");
   }
