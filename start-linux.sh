@@ -66,19 +66,18 @@ export GOOGLE_OAUTH_REDIRECT_URI="$URL/api/auth/gmail/callback"
 if [ ! -x "$VENV/bin/python3" ]; then
     echo ">>> Primera vez: preparando Python y dependencias..."
 
-    # Asegurar paquetes del sistema. En distros con apt (Mint/Ubuntu/Debian/Kali)
-    # instalamos python3+venv+pip y TAMBIÉN los headers de compilación: si tu
-    # versión de Python no tiene wheel de lxml (p. ej. 3.13), pip lo compila desde
-    # fuente y necesita libxml2/libxslt-dev + un compilador.
-    if command -v apt-get >/dev/null 2>&1; then
-        echo ">>> Instalando paquetes del sistema (puede pedir tu contraseña de sudo)..."
-        $SUDO apt-get update -y || true
-        $SUDO apt-get install -y python3 python3-venv python3-pip \
-            python3-dev build-essential libxml2-dev libxslt1-dev zlib1g-dev || true
-    elif ! python3 -c "import ensurepip, venv" >/dev/null 2>&1; then
-        echo "ERROR: falta python3-venv y no encontré apt-get."
-        echo "       Instala python3, python3-venv, python3-pip y los headers de tu distro."
-        exit 1
+    # Instala SOLO lo necesario: si venv/pip del sistema ya funcionan, NO instala
+    # nada. Como las dependencias bajan como wheel (Python 3.13), no se compila
+    # nada → no hacen falta compiladores ni paquetes -dev.
+    if ! python3 -c "import ensurepip, venv" >/dev/null 2>&1; then
+        if command -v apt-get >/dev/null 2>&1; then
+            echo ">>> Falta python3-venv/pip; instalando lo mínimo (puede pedir sudo)..."
+            $SUDO apt-get update -y || true
+            $SUDO apt-get install -y python3 python3-venv python3-pip
+        else
+            echo "ERROR: instala python3, python3-venv y python3-pip con tu gestor de paquetes."
+            exit 1
+        fi
     fi
 
     echo ">>> Creando entorno virtual e instalando dependencias (tarda unos minutos)..."

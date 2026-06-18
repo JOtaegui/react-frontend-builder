@@ -9,6 +9,13 @@ export interface ExportConfirmedDatum {
   evidencia?: string;
 }
 
+export interface ExportHeaderIpDetail {
+  ip: string;
+  country?: string | null;
+  is_chilean?: boolean;
+  criterion?: string;
+}
+
 export interface ExportCompany {
   company_name: string;
   primary_domain: string;
@@ -32,6 +39,8 @@ export interface ExportCompany {
   email_spam_count: number;
   email_header_ips: string[];
   email_header_ip_chile_matches: string[];
+  email_header_ip_details: ExportHeaderIpDetail[];
+  email_auth_domains: string[];
   email_from_addresses: string[];
   email_reply_to_addresses: string[];
   email_return_path_addresses: string[];
@@ -216,16 +225,35 @@ export function exportConsolidatedToExcel(args: ExportArgs): void {
   }
   XLSX.utils.book_append_sheet(wb, sheetFromRows(piiRows, piiHeaders), "Datos personales");
 
-  // ── 5) Cabeceras (IPs) — hoja aparte ─────────────────────────────────────
-  const ipHeaders = ["empresa", "dominio", "ip", "ip_en_chile"];
-  const ipRows: Record<string, unknown>[] = [];
+  // ── 5) Cabeceras (tidy, con TIPO de cabecera) — hoja aparte ──────────────
+  const headerHeaders = ["empresa", "dominio", "tipo_cabecera", "valor", "pais", "en_chile", "criterio"];
+  const headerRows: Record<string, unknown>[] = [];
+  const pushHeader = (
+    c: ExportCompany, tipo: string, valor: string,
+    pais = "", enChile = "", criterio = "",
+  ) => {
+    headerRows.push({
+      empresa: c.company_name, dominio: c.primary_domain,
+      tipo_cabecera: tipo, valor, pais, en_chile: enChile, criterio,
+    });
+  };
   for (const c of companies) {
-    const chile = new Set(c.email_header_ip_chile_matches.map((x) => x.trim()));
-    for (const ip of c.email_header_ips) {
-      ipRows.push({ empresa: c.company_name, dominio: c.primary_domain, ip, ip_en_chile: yesNo(chile.has(ip.trim())) });
+    c.email_from_addresses.forEach((v) => pushHeader(c, "From", v));
+    c.email_reply_to_addresses.forEach((v) => pushHeader(c, "Reply-To", v));
+    c.email_return_path_addresses.forEach((v) => pushHeader(c, "Return-Path", v));
+    c.email_auth_domains.forEach((v) => pushHeader(c, "Autenticación (SPF/DKIM)", v));
+    if (c.email_header_ip_details.length > 0) {
+      c.email_header_ip_details.forEach((d) =>
+        pushHeader(c, "IP (Received)", d.ip, d.country ?? "", yesNo(Boolean(d.is_chilean)), d.criterion ?? ""),
+      );
+    } else {
+      const chile = new Set(c.email_header_ip_chile_matches.map((x) => x.trim()));
+      c.email_header_ips.forEach((ip) =>
+        pushHeader(c, "IP (Received)", ip, "", yesNo(chile.has(ip.trim())), ""),
+      );
     }
   }
-  XLSX.utils.book_append_sheet(wb, sheetFromRows(ipRows, ipHeaders), "Cabeceras (IPs)");
+  XLSX.utils.book_append_sheet(wb, sheetFromRows(headerRows, headerHeaders), "Cabeceras");
 
   // ── 6) Dominios — dominio + fuente (email/browser/ambos) ─────────────────
   const domHeaders = ["dominio", "empresa", "fuente"];
@@ -251,7 +279,7 @@ export function exportConsolidatedToExcel(args: ExportArgs): void {
   });
   XLSX.utils.book_append_sheet(wb, sheetFromRows(breachRows, breachHeaders), "Filtraciones");
 
-  // ── 8) Evidencia (tidy: asuntos, adjuntos, from/reply-to/return-path) ────
+  // ── 8) Evidencia (tidy: asuntos y adjuntos; las cabeceras van en su hoja) ─
   const evHeaders = ["empresa", "dominio", "tipo", "valor"];
   const evRows: Record<string, unknown>[] = [];
   const pushEv = (c: ExportCompany, tipo: string, valores: string[]) => {
@@ -260,9 +288,6 @@ export function exportConsolidatedToExcel(args: ExportArgs): void {
   for (const c of companies) {
     pushEv(c, "asunto", c.email_sample_subjects);
     pushEv(c, "adjunto", c.email_attachment_filenames);
-    pushEv(c, "from", c.email_from_addresses);
-    pushEv(c, "reply_to", c.email_reply_to_addresses);
-    pushEv(c, "return_path", c.email_return_path_addresses);
   }
   XLSX.utils.book_append_sheet(wb, sheetFromRows(evRows, evHeaders), "Evidencia");
 

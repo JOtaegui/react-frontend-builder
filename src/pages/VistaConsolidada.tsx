@@ -35,6 +35,13 @@ type BreachCache = Map<string, BreachCacheEntry>;
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
+interface HeaderIpDetail {
+  ip: string;
+  country?: string | null;
+  is_chilean?: boolean;
+  criterion?: string;
+}
+
 interface EmailSender {
   company_name: string;
   primary_domain: string;
@@ -59,6 +66,9 @@ interface EmailSender {
     return_path_addresses: string[];
     header_ips?: string[];
     header_ip_chile_matches?: string[];
+    header_ip_countries?: string[];
+    header_ip_details?: HeaderIpDetail[];
+    auth_domains?: string[];
   };
   risk: { level: "low" | "medium" | "high" };
 }
@@ -138,6 +148,8 @@ interface ConsolidatedCompany {
   email_spam_count: number;
   email_header_ips: string[];
   email_header_ip_chile_matches: string[];
+  email_header_ip_details: HeaderIpDetail[];
+  email_auth_domains: string[];
   email_from_addresses: string[];
   email_reply_to_addresses: string[];
   email_return_path_addresses: string[];
@@ -791,6 +803,8 @@ export default function VistaConsolidada() {
         email_spam_count:    sender.evidence?.spam_count    ?? 0,
         email_header_ips:              sender.evidence?.header_ips              ?? [],
         email_header_ip_chile_matches: sender.evidence?.header_ip_chile_matches ?? [],
+        email_header_ip_details:       sender.evidence?.header_ip_details       ?? [],
+        email_auth_domains:            sender.evidence?.auth_domains            ?? [],
         email_from_addresses:     sender.evidence?.from_addresses     ?? [],
         email_reply_to_addresses: sender.evidence?.reply_to_addresses ?? [],
         email_return_path_addresses: sender.evidence?.return_path_addresses ?? [],
@@ -854,6 +868,8 @@ export default function VistaConsolidada() {
           email_spam_count:    0,
           email_header_ips:              [],
           email_header_ip_chile_matches: [],
+          email_header_ip_details:       [],
+          email_auth_domains:            [],
           email_from_addresses:     [],
           email_reply_to_addresses: [],
           email_return_path_addresses: [],
