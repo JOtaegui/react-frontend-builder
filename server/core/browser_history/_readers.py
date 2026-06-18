@@ -216,6 +216,23 @@ class OperaGXHistoryReader(ChromiumHistoryReader):
         if OS_NAME == "Windows":
             roaming = Path(os.environ.get("APPDATA")     or home / "AppData" / "Roaming")
             local   = Path(os.environ.get("LOCALAPPDATA") or home / "AppData" / "Local")
+            found: list[Path] = []
+            # Escanea Opera Software\ y toma cualquier carpeta de Opera GX con History,
+            # sin depender del nombre exacto (varía entre versiones/canales).
+            for base in (roaming, local):
+                opera_root = base / "Opera Software"
+                if not opera_root.is_dir():
+                    continue
+                try:
+                    subs = sorted(opera_root.iterdir())
+                except OSError:
+                    subs = []
+                for sub in subs:
+                    if sub.is_dir() and "gx" in sub.name.lower():
+                        found.append(sub / "History")
+            if found:
+                return found
+            # Respaldo: nombres conocidos por si no se pudo listar la carpeta.
             names = ["Opera GX Stable", "Opera GX", "Opera GX Developer"]
             return [base / "Opera Software" / name / "History"
                     for base in (roaming, local) for name in names]
