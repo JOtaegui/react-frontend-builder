@@ -10,7 +10,7 @@ import { Dialog, DialogClose, DialogContent, DialogDescription, DialogFooter, Di
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import {
   Fingerprint, Mail, Chrome, LayoutDashboard, ShieldCheck, CheckCircle2,
-  Lock, Eye, Search, ArrowRight, Loader2, AlertTriangle, Target,
+  Lock, Eye, ArrowRight, Loader2, AlertTriangle, Target,
 } from "lucide-react";
 import {
   LS_EMAIL_RESULT, LS_BROWSER_RESULT,
@@ -317,10 +317,6 @@ export default function Inicio() {
           <span className="text-muted-foreground/40">·</span>
           <Button variant="ghost" size="sm" onClick={() => navigate("/baja-historial")} className="gap-1.5 text-muted-foreground">
             <ShieldCheck className="h-4 w-4" /> Solicitudes de baja
-          </Button>
-          <span className="text-muted-foreground/40">·</span>
-          <Button variant="ghost" size="sm" onClick={() => navigate("/busqueda")} className="gap-1.5 text-muted-foreground">
-            <Search className="h-4 w-4" /> Búsqueda por nombre o RUT
           </Button>
         </div>
       </div>
