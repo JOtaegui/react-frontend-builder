@@ -9,10 +9,11 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/u
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
-  AlertTriangle, Building2, Car, CheckCircle2, Chrome, CreditCard, Globe,
+  AlertTriangle, Building2, Car, CheckCircle2, Chrome, CreditCard, Download, Globe,
   KeyRound, LayoutDashboard, Loader2, LogIn, Mail, MapPin, Phone,
   ShieldAlert, ShieldCheck, ShieldOff, ShoppingCart, User,
 } from "lucide-react";
+import { exportConsolidatedToExcel, type ExportProfile } from "@/lib/exportConsolidated";
 
 // ── LocalStorage Keys ─────────────────────────────────────────────────────────
 
@@ -990,6 +991,24 @@ export default function VistaConsolidada() {
 
   const noData = !emailResult && !browserResult;
 
+  const handleExport = () => {
+    exportConsolidatedToExcel({
+      companies: rankedCompanies,
+      profile: (profile as unknown as ExportProfile) ?? null,
+      holderEmail,
+      emailAddress: emailResult?.email_address ?? null,
+      breachOf: (c) => {
+        const key = normalizeDomainKey(c.primary_domain);
+        const entry = hibpCache.get(key);
+        return {
+          inCl: clDomains.has(key),
+          inHibp: entry?.hibpBreach ?? false,
+          breachNames: entry?.breachNames ?? [],
+        };
+      },
+    });
+  };
+
   // ── Render ────────────────────────────────────────────────────────────────
   return (
     <Layout>
@@ -1006,12 +1025,19 @@ export default function VistaConsolidada() {
               Ranking de empresas detectadas en correo y navegación — con datos personales encontrados
             </p>
           </div>
-          {hibpLoading && (
-            <div className="ml-auto flex items-center gap-2 rounded-full border border-red-500/20 bg-red-500/5 px-3 py-1.5 text-xs font-medium text-red-600 dark:text-red-400">
-              <Loader2 className="h-3.5 w-3.5 animate-spin" />
-              Consultando filtraciones (HIBP)…
-            </div>
-          )}
+          <div className="ml-auto flex items-center gap-2">
+            {hibpLoading && (
+              <div className="flex items-center gap-2 rounded-full border border-red-500/20 bg-red-500/5 px-3 py-1.5 text-xs font-medium text-red-600 dark:text-red-400">
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                Consultando filtraciones (HIBP)…
+              </div>
+            )}
+            {!noData && (
+              <Button variant="outline" size="sm" onClick={handleExport} className="gap-2">
+                <Download className="h-4 w-4" /> Exportar a Excel
+              </Button>
+            )}
+          </div>
         </div>
 
         {/* Sin datos */}

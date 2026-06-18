@@ -33,6 +33,9 @@ from core.personal_data import (
     select_primary_rut,
     street_core as _address_street_core,
 )
+from core.personal_data.rut_extractor import _normalize_rut as _normalize_rut_value
+from core.personal_data.phone_extractor import _normalize_phone as _normalize_phone_value
+from core.personal_data.plate_extractor import _normalize_plate as _normalize_plate_value
 
 from models.schemas import (
     AuthorizedEmailMessage,
@@ -1428,6 +1431,66 @@ def _classify_sender(
     }
 
 
+def _clean_ruts(values: list[str]) -> list[str]:
+    """Valida (dígito verificador), normaliza y dedupe RUTs por empresa."""
+    out: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        norm = _normalize_rut_value(value)
+        if not norm:
+            continue
+        key = norm.replace(".", "").replace("-", "").upper()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(norm)
+    return sorted(out)
+
+
+def _clean_plates(values: list[str]) -> list[str]:
+    """Valida formato chileno, normaliza y dedupe patentes por empresa."""
+    out: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        norm = _normalize_plate_value(value)
+        if not norm or norm in seen:
+            continue
+        seen.add(norm)
+        out.append(norm)
+    return sorted(out)
+
+
+def _clean_phones(
+    values: list[str],
+    counts: Optional[dict[str, int]] = None,
+    scores: Optional[dict[str, int]] = None,
+) -> tuple[list[str], dict[str, int], dict[str, int]]:
+    """Valida (móvil/fijo chileno), normaliza a '+56 X XXXX XXXX' y dedupe por
+    dígitos, reasignando conteos/puntajes a la forma canónica."""
+    counts = counts or {}
+    scores = scores or {}
+    order: list[str] = []
+    out_counts: dict[str, int] = {}
+    out_scores: dict[str, int] = {}
+    seen: set[str] = set()
+    for value in values:
+        norm = _normalize_phone_value(value)
+        if not norm:
+            continue
+        key = re.sub(r"\D", "", norm)
+        c = counts.get(value, 0)
+        s = scores.get(value, 0)
+        if key in seen:
+            out_counts[norm] = out_counts.get(norm, 0) + c
+            out_scores[norm] = max(out_scores.get(norm, 0), s)
+            continue
+        seen.add(key)
+        order.append(norm)
+        out_counts[norm] = c
+        out_scores[norm] = s
+    return sorted(order), out_counts, out_scores
+
+
 def _to_identified_sender(sender: SenderAggregate) -> IdentifiedSender:
     level = "low"
     if sender.suspicious_infrastructure or sender.suspected_data_broker:
@@ -1468,6 +1531,17 @@ def _to_identified_sender(sender: SenderAggregate) -> IdentifiedSender:
         ordered_addresses = sorted(sender.personal_addresses)
         primary_address = select_primary_address(ordered_addresses)
 
+    # Validación + normalización + dedup por empresa (RUT con DV, teléfono
+    # móvil/fijo chileno, patente con formato válido). Mantiene consistentes el
+    # listado por empresa, la selección del primario y el conteo de fuentes.
+    clean_ruts = _clean_ruts(list(sender.personal_ruts))
+    clean_plates = _clean_plates(list(sender.personal_plates))
+    clean_phones, clean_phone_counts, clean_phone_scores = _clean_phones(
+        list(sender.personal_phones),
+        sender.personal_phone_counts,
+        sender.personal_phone_scores,
+    )
+
     return IdentifiedSender(
         company_name=sender.company_name,
         normalized_domain=sender.normalized_domain,
@@ -1484,17 +1558,17 @@ def _to_identified_sender(sender: SenderAggregate) -> IdentifiedSender:
         personal_addresses=ordered_addresses,
         primary_personal_address=primary_address,
         personal_address_evidence=sender.personal_address_evidence,
-        personal_ruts=sorted(sender.personal_ruts),
-        primary_personal_rut=select_primary_rut(sorted(sender.personal_ruts)),
-        personal_phones=sorted(sender.personal_phones),
+        personal_ruts=clean_ruts,
+        primary_personal_rut=select_primary_rut(clean_ruts),
+        personal_phones=clean_phones,
         primary_personal_phone=select_primary_phone(
-            sorted(sender.personal_phones),
-            counts=sender.personal_phone_counts,
-            scores=sender.personal_phone_scores,
+            clean_phones,
+            counts=clean_phone_counts,
+            scores=clean_phone_scores,
         ),
         personal_phone_evidence=sender.personal_phone_evidence,
-        personal_plates=sorted(sender.personal_plates),
-        primary_personal_plate=select_primary_plate(sorted(sender.personal_plates)),
+        personal_plates=clean_plates,
+        primary_personal_plate=select_primary_plate(clean_plates),
         personal_plate_evidence=sender.personal_plate_evidence,
         subdomains=sorted(sender.subdomains),
         reply_to_domains=sorted(sender.reply_to_domains),

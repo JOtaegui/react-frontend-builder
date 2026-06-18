@@ -383,16 +383,12 @@ def _phone_variants(sender: IdentifiedSender) -> Iterable[tuple[str, str, float]
     primary_digits = re.sub(r"\D", "", normalize_phone(primary) or primary or "") if primary else None
     for phone in sender.personal_phones:
         normalized = normalize_phone(phone)
-        if normalized:
-            digits = re.sub(r"\D", "", normalized)
-            display = normalized
-        else:
-            digits = re.sub(r"\D", "", phone)
-            display = phone.strip()
-        if not digits:
+        if not normalized:
+            # no es un móvil/fijo chileno válido → se descarta (igual que RUT/patente)
             continue
+        digits = re.sub(r"\D", "", normalized)
         mult = 1.0 if primary_digits is None or digits == primary_digits else 0.4
-        yield f"phone:{digits}", display, mult
+        yield f"phone:{digits}", normalized, mult
 
 
 def _plate_variants(sender: IdentifiedSender) -> Iterable[tuple[str, str]]:

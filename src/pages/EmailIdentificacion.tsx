@@ -645,9 +645,19 @@ export default function EmailIdentificacion() {
     const ruts = pickFrom("personal_ruts");
     const phones = pickFrom("personal_phones");
     const plates = pickFrom("personal_plates");
-    const avgConfidence = sendersWithPersonalData.length > 0
-      ? sendersWithPersonalData.reduce((acc, sender) => acc + (sender.personal_data_confidence ?? 0), 0) / sendersWithPersonalData.length
-      : 0;
+    // Confianza general congruente con las señales mostradas: promedio de la
+    // confianza de los datos del perfil consolidado que SÍ se encontraron
+    // (nombre, dirección, RUT, teléfono, patente). Antes promediaba la confianza
+    // por empresa (muchas bajas) y quedaba incongruente con los datos de abajo.
+    const cp = result?.consolidated_profile ?? null;
+    const pointConfidences = [cp?.name, cp?.address, cp?.rut, cp?.phone, cp?.plate]
+      .filter((p): p is ConsolidatedDataPoint => Boolean(p))
+      .map((p) => p.confidence ?? 0);
+    const avgConfidence = pointConfidences.length > 0
+      ? pointConfidences.reduce((a, b) => a + b, 0) / pointConfidences.length
+      : sendersWithPersonalData.length > 0
+        ? sendersWithPersonalData.reduce((acc, sender) => acc + (sender.personal_data_confidence ?? 0), 0) / sendersWithPersonalData.length
+        : 0;
 
     // Perfil consolidado del backend: cruce ponderado por confiabilidad de
     // cada empresa. Cuando existe, manda sobre el conteo local.

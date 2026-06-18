@@ -494,6 +494,7 @@ def extract_chilean_address_matches_with_context(
 
             # Intentar capturar la comuna que sigue al número
             norm = _append_commune(norm, content[m.end(): m.end() + 60])
+            norm = _strip_after_commune(norm)
             score = _score_address(window, norm, names, ruts, explicit_label=False)
             score += _cross_validate(window, nearby_phones, nearby_names,
                                       boost_if_near_phone, boost_if_near_name)
@@ -637,6 +638,7 @@ def find_address_near_target(content: str, target: str) -> str | None:
                     continue
 
                 norm = _append_commune(norm, window[pm.end(): pm.end() + 80])
+                norm = _strip_after_commune(norm)
 
                 # Puntuación: premia longitud y penaliza offset residual del core
                 core_offset = _nt(norm).find(core)
@@ -1093,13 +1095,12 @@ def _has_street_marker(text: str) -> bool:
     )
 
 
-def _find_commune_in_text(text: str) -> str | None:
-    cache = getattr(_find_commune_in_text, "_cache", None)
+def _commune_regex() -> tuple[re.Pattern, dict[str, str]]:
+    cache = getattr(_commune_regex, "_cache", None)
     if cache is None:
         normalized_to_display: dict[str, str] = {}
         for commune in sorted(_COMUNAS_CHILE, key=len, reverse=True):
-            normalized = _nt(commune)
-            normalized_to_display.setdefault(normalized, commune)
+            normalized_to_display.setdefault(_nt(commune), commune)
         options = sorted(normalized_to_display.keys(), key=len, reverse=True)
         if options:
             pattern = re.compile(
@@ -1108,10 +1109,48 @@ def _find_commune_in_text(text: str) -> str | None:
         else:
             pattern = re.compile(r"$^")
         cache = (pattern, normalized_to_display)
-        setattr(_find_commune_in_text, "_cache", cache)
+        setattr(_commune_regex, "_cache", cache)
+    return cache
 
-    pattern, normalized_to_display = cache
+
+def _find_commune_in_text(text: str) -> str | None:
+    pattern, normalized_to_display = _commune_regex()
     match = pattern.search(_nt(text))
     if not match:
         return None
     return normalized_to_display.get(match.group(1))
+
+
+# Continuaciones válidas tras la comuna (región, depto, código postal, número…)
+_ADDRESS_CONTINUATION_RE = re.compile(
+    r"(?i)\b(regi[oó]n|rm|metropolitana|santiago|chile|valpara[ií]so|"
+    r"b[ií]o\s?b[ií]o|depto|dpto|departamento|of\.?|oficina|casa|block|"
+    r"piso|local|c[oó]digo|postal)\b|\d"
+)
+# El sobrante parece nombre propio: 1 a 4 palabras Capitalizadas y nada más.
+_TRAILING_NAME_RE = re.compile(
+    r"(?u)^[\s,.\-–]*(?:[A-ZÁÉÍÓÚÜÑ][a-záéíóúüñ'’]+(?:\s+|$)){1,4}$"
+)
+
+
+def _strip_after_commune(value: str) -> str:
+    """Recorta lo que venga después de la ÚLTIMA comuna conocida cuando parece
+    el nombre del destinatario (p. ej. '..., Lo Barnechea Juan Otaegui').
+    Conserva continuaciones válidas de dirección (región, depto, número…)."""
+    if not value:
+        return value
+    pattern, _ = _commune_regex()
+    last = None
+    for m in pattern.finditer(_nt(value)):
+        last = m
+    if last is None:
+        return value
+    end = last.end()
+    tail = value[end:]
+    if not tail.strip(" ,.;:–-"):
+        return value
+    if _ADDRESS_CONTINUATION_RE.search(tail):
+        return value
+    if _TRAILING_NAME_RE.match(tail):
+        return value[:end].strip(" ,.;:–-")
+    return value
