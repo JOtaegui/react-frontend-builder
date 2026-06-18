@@ -205,39 +205,44 @@ class EdgeHistoryReader(ChromiumHistoryReader):
 
 
 class OperaGXHistoryReader(ChromiumHistoryReader):
-    """Opera GX (Chromium). En Windows guarda sus datos en %APPDATA% (Roaming),
-    no en Local como Chrome/Edge, por eso resuelve su propia base."""
+    """Opera GX (Chromium). Opera difiere de Chrome/Edge: en Windows el perfil va
+    en %APPDATA% (Roaming) — a veces en Local — y la carpeta suele llamarse
+    'Opera GX Stable'. Los archivos del perfil van directos (sin subcarpeta
+    'Default'). Por eso probamos varias ubicaciones y usamos la que exista."""
     browser_name = "Opera GX"
-    OS_SUBPATH = {
-        "Darwin": "com.operasoftware.OperaGX/History",
-        "Linux":  "opera-gx/History",
-    }
 
-    def _opera_base(self) -> Optional[Path]:
+    def _candidates(self) -> list[Path]:
+        home = Path.home()
         if OS_NAME == "Windows":
-            roaming = os.environ.get("APPDATA")
-            return Path(roaming) if roaming else Path.home() / "AppData" / "Roaming"
-        return chromium_base_dir()
+            roaming = Path(os.environ.get("APPDATA")     or home / "AppData" / "Roaming")
+            local   = Path(os.environ.get("LOCALAPPDATA") or home / "AppData" / "Local")
+            names = ["Opera GX Stable", "Opera GX", "Opera GX Developer"]
+            return [base / "Opera Software" / name / "History"
+                    for base in (roaming, local) for name in names]
+        if OS_NAME == "Darwin":
+            app = home / "Library" / "Application Support"
+            return [
+                app / "com.operasoftware.OperaGX" / "History",
+                app / "Opera Software" / "Opera GX Stable" / "History",
+            ]
+        if OS_NAME == "Linux":
+            cfg = home / ".config"
+            return [cfg / "opera-gx" / "History", cfg / "opera-gx-stable" / "History"]
+        return []
 
-    def _opera_sub(self) -> Optional[str]:
-        if OS_NAME == "Windows":
-            return "Opera Software/Opera GX Stable/History"
-        return self.OS_SUBPATH.get(OS_NAME)
+    def _resolve(self) -> Path:
+        candidates = self._candidates()
+        for path in candidates:
+            if path.exists():
+                return path
+        return candidates[0] if candidates else Path("opera-gx-no-encontrado")
 
     @property
     def history_db_path(self) -> Path:
-        base = self._opera_base()
-        sub = self._opera_sub()
-        if base is None or not sub:
-            return Path(sub or "navegador-no-soportado")
-        return base.joinpath(*sub.split("/"))
+        return self._resolve()
 
     def chromium_profile_dir(self) -> Optional[Path]:
-        base = self._opera_base()
-        sub = self._opera_sub()
-        if base is None or not sub:
-            return None
-        return base.joinpath(*sub.split("/")).parent
+        return self._resolve().parent
 
 
 # ── Firefox (esquema y rutas propios) ─────────────────────────────────────────
