@@ -23,6 +23,7 @@ const BROWSER_LABELS: Record<string, string> = {
   safari: "Safari",
   brave: "Brave",
   edge: "Microsoft Edge",
+  "opera-gx": "Opera GX",
   firefox: "Firefox",
   "chrome-canary": "Chrome Canary",
 };

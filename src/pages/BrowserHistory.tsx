@@ -16,6 +16,7 @@ const BROWSER_OPTIONS = [
   { value: "safari",        label: "Safari"         },
   { value: "brave",         label: "Brave"          },
   { value: "edge",          label: "Microsoft Edge" },
+  { value: "opera-gx",      label: "Opera GX"       },
   { value: "firefox",       label: "Firefox"        },
   { value: "chrome-canary", label: "Chrome Canary"  },
 ] as const;

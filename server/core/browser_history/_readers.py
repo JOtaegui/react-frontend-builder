@@ -204,6 +204,42 @@ class EdgeHistoryReader(ChromiumHistoryReader):
     }
 
 
+class OperaGXHistoryReader(ChromiumHistoryReader):
+    """Opera GX (Chromium). En Windows guarda sus datos en %APPDATA% (Roaming),
+    no en Local como Chrome/Edge, por eso resuelve su propia base."""
+    browser_name = "Opera GX"
+    OS_SUBPATH = {
+        "Darwin": "com.operasoftware.OperaGX/History",
+        "Linux":  "opera-gx/History",
+    }
+
+    def _opera_base(self) -> Optional[Path]:
+        if OS_NAME == "Windows":
+            roaming = os.environ.get("APPDATA")
+            return Path(roaming) if roaming else Path.home() / "AppData" / "Roaming"
+        return chromium_base_dir()
+
+    def _opera_sub(self) -> Optional[str]:
+        if OS_NAME == "Windows":
+            return "Opera Software/Opera GX Stable/History"
+        return self.OS_SUBPATH.get(OS_NAME)
+
+    @property
+    def history_db_path(self) -> Path:
+        base = self._opera_base()
+        sub = self._opera_sub()
+        if base is None or not sub:
+            return Path(sub or "navegador-no-soportado")
+        return base.joinpath(*sub.split("/"))
+
+    def chromium_profile_dir(self) -> Optional[Path]:
+        base = self._opera_base()
+        sub = self._opera_sub()
+        if base is None or not sub:
+            return None
+        return base.joinpath(*sub.split("/")).parent
+
+
 # ── Firefox (esquema y rutas propios) ─────────────────────────────────────────
 
 class FirefoxHistoryReader(BaseHistoryReader):
@@ -338,6 +374,7 @@ REGISTRY: dict[str, type[BaseHistoryReader]] = {
     "chrome-canary": ChromeCanaryHistoryReader,
     "brave":         BraveHistoryReader,
     "edge":          EdgeHistoryReader,
+    "opera-gx":      OperaGXHistoryReader,
     "firefox":       FirefoxHistoryReader,
     "safari":        SafariHistoryReader,
 }
