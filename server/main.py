@@ -1248,6 +1248,51 @@ async def system_info():
     return {"os": OS_NAME, "os_label": os_label, "available_browsers": available}
 
 
+@app.get("/api/system-info/debug")
+async def system_info_debug():
+    """Diagnóstico de detección de navegadores: muestra la ruta que revisa cada
+    uno y si existe. Abrir http://localhost:8787/api/system-info/debug en el
+    navegador y compartir el JSON. Si devuelve 404, el servidor corre código
+    viejo (hay que reiniciar start.bat)."""
+    import os as _os
+    from pathlib import Path as _Path
+    from core.browser_history._readers import OS_NAME, get_reader, REGISTRY as _REG
+
+    browsers: dict[str, dict] = {}
+    for slug in _REG:
+        try:
+            reader = get_reader(slug)
+            path = reader.history_db_path
+            browsers[slug] = {"path": str(path), "exists": path.exists()}
+        except Exception as exc:
+            browsers[slug] = {"path": f"error: {exc}", "exists": False}
+
+    # Detalle de Opera GX: candidatos probados + carpetas reales bajo "Opera Software"
+    opera: dict = {}
+    try:
+        from core.browser_history._readers import OperaGXHistoryReader
+        og = OperaGXHistoryReader()
+        opera["candidates"] = [{"path": str(p), "exists": p.exists()} for p in og._candidates()]
+    except Exception as exc:
+        opera["candidates_error"] = str(exc)
+
+    opera_dirs: list[str] = []
+    if OS_NAME == "Windows":
+        for env in ("APPDATA", "LOCALAPPDATA"):
+            root = _os.environ.get(env)
+            if not root:
+                continue
+            od = _Path(root) / "Opera Software"
+            if od.is_dir():
+                try:
+                    opera_dirs += [str(s) for s in od.iterdir() if s.is_dir()]
+                except OSError:
+                    pass
+    opera["opera_software_dirs"] = opera_dirs
+
+    return {"os": OS_NAME, "browsers": browsers, "opera_gx": opera}
+
+
 @app.get("/api/local/browser-history")
 async def browser_history_analysis(
     browser: str = Query(default="chrome", description=f"Navegador a analizar. Opciones: {', '.join(['chrome', 'brave', 'edge', 'firefox', 'chrome-canary'])}"),

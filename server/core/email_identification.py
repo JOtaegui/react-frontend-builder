@@ -117,6 +117,44 @@ KNOWN_SENDERS: dict[str, dict[str, Any]] = {
     "x.com": {"company_name": "X", "sender_type": "red_social", "country": "Estados Unidos", "is_chilean": False},
     "paypal.com": {"company_name": "PayPal", "sender_type": "fintech", "country": "Estados Unidos", "is_chilean": False},
     "nubank.com.br": {"company_name": "Nubank", "sender_type": "fintech", "country": "Brasil", "is_chilean": False},
+    # ── Instituciones chilenas de alto volumen de datos cuyo dominio NO se
+    #    autodescribe por sector (no contienen "banco", "salud", "afp", etc.),
+    #    por lo que el clasificador heurístico no les asignaría su peso real.
+    # Banca
+    "bancochile.cl": {"company_name": "Banco de Chile", "sender_type": "banco", "country": "Chile", "is_chilean": True},
+    "itau.cl": {"company_name": "Banco Itau", "sender_type": "banco", "country": "Chile", "is_chilean": True},
+    "scotiabank.cl": {"company_name": "Scotiabank Chile", "sender_type": "banco", "country": "Chile", "is_chilean": True},
+    "ripley.cl": {"company_name": "Banco Ripley", "sender_type": "banco", "country": "Chile", "is_chilean": True},
+    # Salud / isapres / prestadores
+    "colmena.cl": {"company_name": "Isapre Colmena", "sender_type": "salud", "country": "Chile", "is_chilean": True},
+    "consalud.cl": {"company_name": "Isapre Consalud", "sender_type": "salud", "country": "Chile", "is_chilean": True},
+    "banmedica.cl": {"company_name": "Isapre Banmedica", "sender_type": "salud", "country": "Chile", "is_chilean": True},
+    "vidatres.cl": {"company_name": "Vida Tres", "sender_type": "salud", "country": "Chile", "is_chilean": True},
+    "redsalud.cl": {"company_name": "RedSalud", "sender_type": "salud", "country": "Chile", "is_chilean": True},
+    "integramedica.cl": {"company_name": "IntegraMedica", "sender_type": "salud", "country": "Chile", "is_chilean": True},
+    # Previsión / seguros
+    "cuprum.cl": {"company_name": "AFP Cuprum", "sender_type": "seguros", "country": "Chile", "is_chilean": True},
+    "provida.cl": {"company_name": "AFP ProVida", "sender_type": "seguros", "country": "Chile", "is_chilean": True},
+    "planvital.cl": {"company_name": "AFP PlanVital", "sender_type": "seguros", "country": "Chile", "is_chilean": True},
+    "consorcio.cl": {"company_name": "Consorcio", "sender_type": "seguros", "country": "Chile", "is_chilean": True},
+    "metlife.cl": {"company_name": "MetLife Chile", "sender_type": "seguros", "country": "Chile", "is_chilean": True},
+    "previred.com": {"company_name": "Previred", "sender_type": "seguros", "country": "Chile", "is_chilean": True},
+    # Fintech / pagos
+    "transbank.cl": {"company_name": "Transbank", "sender_type": "fintech", "country": "Chile", "is_chilean": True},
+    "tenpo.cl": {"company_name": "Tenpo", "sender_type": "fintech", "country": "Chile", "is_chilean": True},
+    # Telecom
+    "claro.cl": {"company_name": "Claro Chile", "sender_type": "telecom", "country": "Chile", "is_chilean": True},
+    "gtd.cl": {"company_name": "GTD", "sender_type": "telecom", "country": "Chile", "is_chilean": True},
+    # Retail / comercio
+    "cencosud.cl": {"company_name": "Cencosud", "sender_type": "retail", "country": "Chile", "is_chilean": True},
+    "paris.cl": {"company_name": "Paris", "sender_type": "retail", "country": "Chile", "is_chilean": True},
+    "lider.cl": {"company_name": "Lider", "sender_type": "retail", "country": "Chile", "is_chilean": True},
+    "jumbo.cl": {"company_name": "Jumbo", "sender_type": "retail", "country": "Chile", "is_chilean": True},
+    "sodimac.cl": {"company_name": "Sodimac", "sender_type": "retail", "country": "Chile", "is_chilean": True},
+    "easy.cl": {"company_name": "Easy", "sender_type": "retail", "country": "Chile", "is_chilean": True},
+    # Gobierno
+    "registrocivil.cl": {"company_name": "Registro Civil", "sender_type": "gobierno", "country": "Chile", "is_chilean": True},
+    "tesoreria.cl": {"company_name": "Tesoreria General de la Republica", "sender_type": "gobierno", "country": "Chile", "is_chilean": True},
 }
 DATA_BROKER_KEYWORDS = (
     "peoplefinder",
@@ -161,6 +199,60 @@ SECTOR_KEYWORDS: list[tuple[str, str]] = [
     ("insurance", "seguros"),
     ("travel", "viajes"),
     ("air", "viajes"),
+]
+
+# Términos distintivos que, cuando aparecen en el DOMINIO, delatan el sector con
+# bajo riesgo de falso positivo. Se evalúan SOLO contra el dominio (no el asunto)
+# porque palabras como "salud" o "seguro" en un asunto son ambiguas, pero en un
+# dominio son una señal fuerte. Cubren las categorías chilenas de alto valor
+# (salud, seguros/AFP, banca) que el set en inglés no alcanzaba; así el peso de
+# fuente confiable (SENDER_TYPE_WEIGHTS) se aplica a la cola larga de remitentes
+# chilenos desconocidos, no solo a los dominios cableados en KNOWN_SENDERS.
+DOMAIN_SECTOR_KEYWORDS: list[tuple[str, str]] = [
+    # Salud — categoría de peso alto que antes no tenía ningún keyword.
+    ("isapre", "salud"),
+    ("clinica", "salud"),
+    ("hospital", "salud"),
+    ("fonasa", "salud"),
+    ("cruzblanca", "salud"),
+    ("nuevamasvida", "salud"),
+    ("medica", "salud"),
+    ("dental", "salud"),
+    # Previsión / seguros (incluye AFP).
+    ("afp", "seguros"),
+    ("prevision", "seguros"),
+    ("seguros", "seguros"),
+    ("seguro", "seguros"),
+    ("habitat", "seguros"),
+    # Banca y crédito.
+    ("banco", "banco"),
+    ("bancaria", "banco"),
+    ("credito", "banco"),
+    ("cooperativa", "banco"),
+    # Fintech / pagos.
+    ("transbank", "fintech"),
+    ("fintech", "fintech"),
+    ("wallet", "fintech"),
+    # Telecom.
+    ("telecom", "telecom"),
+    ("fibra", "telecom"),
+    # Educación.
+    ("universidad", "educacion"),
+    ("colegio", "educacion"),
+    ("instituto", "educacion"),
+    ("preuniversitario", "educacion"),
+    # Retail / comercio.
+    ("farmacia", "retail"),
+    ("supermercado", "retail"),
+    ("tienda", "retail"),
+    ("comercial", "retail"),
+    # Gobierno (complementa el sufijo gob.cl).
+    ("municipal", "gobierno"),
+    ("ministerio", "gobierno"),
+    ("registrocivil", "gobierno"),
+    # Viajes.
+    ("turismo", "viajes"),
+    ("hotel", "viajes"),
 ]
 PERSONAL_DATA_PATTERNS: list[tuple[str, tuple[str, ...]]] = [
     ("nombre", ("estimado", "estimada", "hola ", "cliente", "usuario", "titular", "beneficiario", "nombre")),
@@ -1020,6 +1112,7 @@ def _parse_message(message: AuthorizedEmailMessage, search_targets: Optional[Ema
     subject = (message.subject or headers.get("subject") or "").strip()
     attachment_text = " ".join(f"Adjunto {filename}" for filename in attachment_filenames)
     content = " ".join(filter(None, [subject, message.snippet, message.body_text, _strip_html(message.body_html or ""), attachment_text]))
+    content = _normalize_unicode_text(content)
     analysis_content = _trim_content_for_personal_data(content, max_chars=MAX_PERSONAL_DATA_ANALYSIS_CHARS)
     content_lower = analysis_content.lower()
     all_domains = {domain for domain in from_domains + reply_to_domains + return_path_domains + auth_domains if domain}
@@ -1696,6 +1789,14 @@ def _guess_company_name(domain: str) -> str:
 
 
 def _guess_sender_type(domain: str, subject: str) -> str:
+    lowered_domain = domain.lower()
+    # 1) Términos distintivos en el DOMINIO → sector de alta precisión. Se evalúa
+    #    primero porque un sector en el dominio es señal fuerte y poco ambigua,
+    #    a diferencia del asunto.
+    for keyword, sector in DOMAIN_SECTOR_KEYWORDS:
+        if keyword in lowered_domain:
+            return sector
+    # 2) Fallback heurístico (mayormente inglés) sobre dominio + asunto.
     lowered = f"{domain} {subject}".lower()
     for keyword, sector in SECTOR_KEYWORDS:
         if keyword in lowered:
@@ -1732,6 +1833,41 @@ def _strip_html(value: str) -> str:
     cleaned = _COMMENT_RE.sub(" ", cleaned)
     no_tags = re.sub(r"<[^>]+>", " ", cleaned)
     return re.sub(r"\s+", " ", unescape(no_tags)).strip()
+
+
+# Caracteres de ancho cero / invisibles que parten un RUT o teléfono por dentro
+# (espacio de ancho cero, juntador de palabras, BOM y guion suave). Los correos
+# HTML y los clientes de correo los inyectan con frecuencia.
+_ZERO_WIDTH_RE = re.compile(r"[­​‌‍⁠﻿]")
+# Variantes tipográficas de guion (figura, en/em dash, signo menos, guion sin
+# corte, guion de ancho completo) que NO matchean el `-` ASCII que exigen los
+# patrones de RUT y teléfono.
+_UNICODE_DASH_RE = re.compile(r"[‐‑‒–—―−⁃－]")
+# Espacios Unicode (duro, fino, de figura, etc.) que rompen los separadores de
+# los patrones de formato fijo. NFKC pliega la mayoría, pero se normalizan
+# explícitamente para cubrir los que no tienen descomposición de compatibilidad.
+_UNICODE_SPACE_RE = re.compile(r"[   -   　]")
+
+
+def _normalize_unicode_text(value: str) -> str:
+    """Unifica el texto crudo a su forma ASCII canónica antes de extraer datos.
+
+    Los correos —sobre todo los HTML— usan variantes tipográficas (guiones
+    largos, espacios duros, caracteres de ancho cero, dígitos de ancho
+    completo) que rompen los patrones de formato fijo aunque el dato esté
+    presente. Esto degrada en particular la detección de RUT (`12.345.678-9`)
+    y teléfono (`+56 9 XXXX XXXX`). Esta pasada se aplica una sola vez sobre el
+    contenido ensamblado, de modo que los cinco extractores reciben texto
+    normalizado de forma homogénea.
+    """
+    if not value:
+        return value
+    # NFKC pliega dígitos de ancho completo, ligaduras y formas de compatibilidad.
+    value = unicodedata.normalize("NFKC", value)
+    value = _ZERO_WIDTH_RE.sub("", value)        # quita ancho cero y guion suave
+    value = _UNICODE_DASH_RE.sub("-", value)     # cualquier guion tipográfico -> ASCII
+    value = _UNICODE_SPACE_RE.sub(" ", value)    # cualquier espacio Unicode -> ASCII
+    return value
 
 
 def _header_lookup(headers: list[EmailHeaderKV], name: str) -> Optional[str]:
