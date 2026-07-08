@@ -234,6 +234,30 @@ _DATE_PATTERN = re.compile(
     r"septiembre|setiembre|octubre|noviembre|diciembre)"
     r"(?:\s+de\s+\d{4})?\b"
 )
+# "Junio 2026" capturado como dirección (FP real ×7 en los 5 sujetos):
+# mes seguido de año no es una calle con número.
+_MONTH_YEAR_PATTERN = re.compile(
+    r"(?i)\b(?:enero|febrero|marzo|abril|mayo|junio|julio|agosto|"
+    r"septiembre|setiembre|octubre|noviembre|diciembre)"
+    r"\s+(?:de\s+)?(?:19|20)\d{2}\b"
+)
+# Pie de página legal/marketing: las direcciones que aparecen ahí son la
+# casa matriz del remitente, no un dato del titular. En los 5 sujetos, 184
+# direcciones aparecían compartidas entre >=2 sujetos (footers corporativos)
+# y la precisión de dirección era 5.2%: este contexto es el mayor generador
+# de falsos positivos de todo el pipeline.
+_FOOTER_CONTEXT_RE = re.compile(
+    r"(?i)(?:"
+    r"todos\s+los\s+derechos(?:\s+reservados)?|derechos\s+reservados|"
+    r"©|\(c\)\s*(?:19|20)\d{2}|copyright|"
+    r"unsubscribe|cancelar\s+(?:la\s+)?suscripcion|desuscrib|"
+    r"dar(?:te|se|me)?\s+de\s+baja|"
+    r"no\s+respond(?:as|er|a)\s+(?:a\s+)?este\s+(?:correo|mensaje|email)|"
+    r"correo\s+(?:fue\s+)?generado\s+automaticamente|"
+    r"politica\s+de\s+privacidad|terminos\s+y\s+condiciones|"
+    r"casa\s+matriz|siguenos\s+en|siganos\s+en"
+    r")"
+)
 _URL_PATTERN = re.compile(r"https?://|www\.", re.IGNORECASE)
 _EMAIL_PATTERN = re.compile(r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}")
 _RUT_PATTERN = re.compile(r"\b\d{7,8}-[\dkK]\b")
@@ -377,6 +401,14 @@ _GENERIC_TOKENS: frozenset[str] = frozenset({
     "visitanos", "visítanos", "visita",
     "atencion", "atención", "servicio", "soporte", "ayuda", "asistencia",
     "sucursal", "sucursales", "tienda", "tiendas", "local", "locales",
+    # Meses: "Junio 2026" no es una dirección (FP real ×7)
+    "enero", "febrero", "marzo", "abril", "mayo", "junio", "julio",
+    "agosto", "septiembre", "setiembre", "octubre", "noviembre", "diciembre",
+    # Productos/software con número de versión: "Windows 10" (FP real ×5)
+    "windows", "android", "iphone", "ios", "office", "chrome", "version",
+    "versión",
+    # Prosa con año: "Este Correo Se Escribio el 2025" (FP real ×6)
+    "correo", "escribio", "escribió", "evalua", "evalúa",
 })
 
 # ---------------------------------------------------------------------------
@@ -479,6 +511,21 @@ def extract_chilean_address_matches_with_context(
             window = content[s:e]
             if _has_disqualifying_context(norm, window):
                 continue
+
+            # ── Filtro de pie de página corporativo ──────────────────────────
+            # Si la ventana tiene señales de footer legal/marketing (© , dere-
+            # chos reservados, cancelar suscripción…) y NO hay etiqueta de
+            # entrega inmediatamente antes del match, la dirección es la casa
+            # matriz del remitente. La etiqueta se exige ANTES del match (no
+            # en cualquier parte de la ventana) para que una "Dirección de
+            # envío" legítima en otra línea no rescate al footer.
+            # Motivación: precisión de dirección 5.2% en los 5 sujetos, con
+            # los FP más repetidos ("Ahumada 251" ×10, "Apoquindo 3846" ×6)
+            # provenientes todos de footers.
+            if _FOOTER_CONTEXT_RE.search(_nt(window)):
+                preceding = _nt(content[max(0, m.start() - 100): m.start()])
+                if not any(kw in preceding for kw in ADDRESS_LABEL_KEYWORDS):
+                    continue
 
             # ── Regla clave anti-falsos-positivos ────────────────────────────
             # Para patrones sin prefijo de calle ("Av.", "Calle", etc.) se exige
@@ -731,6 +778,8 @@ def _extract_labeled_candidates(content: str) -> list[tuple[str, str]]:
                 if idx + j >= len(lines):
                     break
                 nxt = lines[idx + j]
+                if _FOOTER_CONTEXT_RE.search(_nt(nxt)):
+                    break  # empezó el pie de página legal → no es continuación
                 if _looks_like_address(nxt):
                     nxt_clean = _strip_trailing(nxt).strip(" ,.;:–-")
                     candidate = f"{candidate}, {nxt_clean}"
@@ -883,6 +932,9 @@ def _clean_address(value: str) -> str | None:
         return None
 
     if _DATE_PATTERN.search(nv):
+        return None
+
+    if _MONTH_YEAR_PATTERN.search(nv):
         return None
 
     if len(nv.split()) > 14:
@@ -1132,11 +1184,26 @@ _TRAILING_NAME_RE = re.compile(
     r"(?u)^[\s,.\-–]*(?:[A-ZÁÉÍÓÚÜÑ][a-záéíóúüñ'’]+(?:\s+|$)){1,4}$"
 )
 
+# Palabras que, tras la comuna, delatan que empezó una cola de etiqueta o prosa
+# de e-commerce ajena al domicilio (no son continuación válida de dirección).
+# Permite cortar casos como "..., Santiago Seguimiento del pedido".
+_POST_COMMUNE_JUNK_RE = re.compile(
+    r"(?i)\b(?:seguimiento|detalle|detalles|compra|pedido|orden|destinatario|"
+    r"nombre|rut|run|tel[eé]fono|celular|correo|email|gracias|estimad[oa]|"
+    r"n[uú]mero|producto|despacho|entrega|env[ií]o|factura|boleta|cliente|"
+    r"titular|recibo|comentario|notas?|hola|detalles\s+de\s+la\s+compra)\b"
+)
+
 
 def _strip_after_commune(value: str) -> str:
-    """Recorta lo que venga después de la ÚLTIMA comuna conocida cuando parece
-    el nombre del destinatario (p. ej. '..., Lo Barnechea Juan Otaegui').
-    Conserva continuaciones válidas de dirección (región, depto, número…)."""
+    """Recorta lo que venga después de la ÚLTIMA comuna conocida cuando no es una
+    continuación válida del domicilio (región, depto, número, código postal…).
+
+    Cubre tres tipos de cola filtrada tras la comuna:
+      - nombre del destinatario     ('..., Lo Barnechea Juan Otaegui')
+      - etiqueta/prosa de e-commerce ('..., Santiago Seguimiento del pedido')
+      - cualquier otro texto que no sea continuación de dirección.
+    """
     if not value:
         return value
     pattern, _ = _commune_regex()
@@ -1149,8 +1216,24 @@ def _strip_after_commune(value: str) -> str:
     tail = value[end:]
     if not tail.strip(" ,.;:–-"):
         return value
+
+    # 1) Cola con palabra de etiqueta/prosa: cortar en su primera aparición,
+    #    incluso si antes hubo continuación válida ("... Región Metropolitana
+    #    Seguimiento del pedido").
+    junk = _POST_COMMUNE_JUNK_RE.search(tail)
+    if junk:
+        cut = (value[:end] + tail[:junk.start()]).strip(" ,.;:–-")
+        if len(cut) >= 8:
+            return cut
+
+    # 2) Continuación válida de dirección (región, depto, número…) → conservar.
     if _ADDRESS_CONTINUATION_RE.search(tail):
         return value
-    if _TRAILING_NAME_RE.match(tail):
-        return value[:end].strip(" ,.;:–-")
+
+    # 3) Resto sin continuación (nombre propio u otro texto) → recortar.
+    if re.search(r"[A-Za-záéíóúüñÁÉÍÓÚÜÑ]", tail):
+        cut = value[:end].strip(" ,.;:–-")
+        if len(cut) >= 8:
+            return cut
+
     return value

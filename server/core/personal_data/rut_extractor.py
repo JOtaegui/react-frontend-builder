@@ -18,6 +18,19 @@ _PERSONAL_CONTEXT_RE = re.compile(
 # Ventana de caracteres alrededor del match donde buscar contexto
 _CONTEXT_WINDOW = 200
 
+# El SII asigna RUT >= 50.000.000 a personas jurídicas (empresas). En la
+# evaluación con 5 sujetos, 101/322 RUT detectados eran jurídicos y ninguno
+# correspondía al titular: son el RUT del emisor en boletas/facturas.
+_RUT_JURIDICO_MIN = 50_000_000
+# Cuerpos bajo 1M son históricos/reservados; en correos son ruido (folios).
+_RUT_NATURAL_MIN = 1_000_000
+
+
+def is_rut_juridico(rut: str) -> bool:
+    """True si el RUT pertenece a una persona jurídica (cuerpo >= 50M)."""
+    body = re.sub(r"[^0-9]", "", rut)[:-1]
+    return body.isdigit() and int(body) >= _RUT_JURIDICO_MIN
+
 
 def extract_chilean_ruts(content: str) -> list[str]:
     """
@@ -110,6 +123,10 @@ def _normalize_rut(value: str) -> str | None:
     if not body.isdigit():
         return None
     if _compute_rut_dv(body) != dv:
+        return None
+    # Solo RUT de persona natural: los jurídicos (>= 50M) son el RUT del
+    # emisor de la boleta, no un dato personal del titular.
+    if not (_RUT_NATURAL_MIN <= int(body) < _RUT_JURIDICO_MIN):
         return None
 
     reversed_body = body[::-1]

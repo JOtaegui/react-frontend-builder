@@ -6,6 +6,7 @@ import binascii
 import email.utils
 import json
 import logging
+import os
 import re
 import unicodedata
 from dataclasses import dataclass, field
@@ -1328,6 +1329,27 @@ def _parse_message(message: AuthorizedEmailMessage, search_targets: Optional[Ema
                     personal_data_types.append("patente")
                 matched_target_types.add("patente")
 
+    # ── Volcado de muestras para depuración de extractores (opt-in) ──────────
+    # Activar con OSINT_DUMP_SAMPLES=1 (opcional: OSINT_DUMP_DIR=/ruta). Guarda,
+    # por cada correo escaneado, el texto exacto analizado + lo que detectó cada
+    # extractor. Permite auditar RECALL: abrir la muestra, ver el dato en el
+    # texto y comprobar que NO está en la lista detectada. Apagado por defecto.
+    if os.environ.get("OSINT_DUMP_SAMPLES"):
+        _dump_scan_sample(
+            message=message,
+            primary_domain=primary_domain,
+            subject=subject,
+            analysis_content=analysis_content,
+            detected={
+                "nombres": name_candidates,
+                "ruts": personal_ruts,
+                "direcciones": personal_addresses,
+                "telefonos": personal_phones,
+                "patentes": personal_plates,
+                "tipos": personal_data_types,
+            },
+        )
+
     return {
         "from_addresses": from_addresses,
         "reply_to_addresses": reply_to_addresses,
@@ -1367,6 +1389,55 @@ def _parse_message(message: AuthorizedEmailMessage, search_targets: Optional[Ema
         "matched_target_types": matched_target_types,
         "target_address_fps": target_address_fps,
     }
+
+
+_DUMP_COUNTER = {"n": 0}
+
+
+def _dump_scan_sample(
+    message: AuthorizedEmailMessage,
+    primary_domain: Optional[str],
+    subject: str,
+    analysis_content: str,
+    detected: dict[str, Any],
+) -> None:
+    """Escribe una muestra JSON del correo escaneado a disco (solo depuración).
+
+    Directorio: $OSINT_DUMP_DIR o ./muestras_scan. Cada archivo trae el texto
+    analizado y lo que detectó cada extractor, para auditar falsos negativos.
+    Ninguna excepción aquí debe romper el escaneo real.
+    """
+    try:
+        limit = int(os.environ.get("OSINT_DUMP_LIMIT", "300"))
+        if _DUMP_COUNTER["n"] >= limit:
+            return
+        out_dir = os.environ.get("OSINT_DUMP_DIR") or os.path.join(os.getcwd(), "muestras_scan")
+        os.makedirs(out_dir, exist_ok=True)
+
+        total_detectado = sum(
+            len(detected[k]) for k in ("nombres", "ruts", "direcciones", "telefonos", "patentes")
+        )
+        idx = _DUMP_COUNTER["n"]
+        _DUMP_COUNTER["n"] += 1
+        # Prefijo "vacio_" cuando el correo tenía texto pero no se detectó NADA:
+        # son los candidatos más probables a falsos negativos.
+        prefijo = "vacio_" if total_detectado == 0 and len(analysis_content) > 80 else ""
+        dominio_slug = re.sub(r"[^a-z0-9]+", "-", (primary_domain or "sin-dominio").lower())[:40]
+        path = os.path.join(out_dir, f"{prefijo}{idx:04d}_{dominio_slug}.json")
+
+        payload = {
+            "message_id": message.provider_message_id,
+            "from_domain": primary_domain,
+            "subject": subject,
+            "recibido": getattr(message, "received_at", None),
+            "texto_analizado": analysis_content,
+            "detectado": detected,
+            "total_detectado": total_detectado,
+        }
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh, ensure_ascii=False, indent=2, default=str)
+    except Exception as exc:  # nunca romper el escaneo por el volcado
+        logger.debug("[dump-sample] no se pudo escribir muestra: %s", exc)
 
 
 def _merge_message(record: SenderAggregate, parsed: dict[str, Any]) -> None:

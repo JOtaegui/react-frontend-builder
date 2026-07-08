@@ -99,11 +99,14 @@ _ORDER_KEYWORDS: tuple[str, ...] = (
 # Señal de que el número es de un servicio/empresa, NO del cliente.
 _SERVICE_KEYWORDS: tuple[str, ...] = (
     "mesa de ayuda",
+    "mesa central",
     "call center",
     "contactenos",
     "contáctenos",
     "llamanos",
     "llámanos",
+    "escribenos",
+    "escríbenos",
     "servicio al cliente",
     "atencion al cliente",
     "atención al cliente",
@@ -111,10 +114,29 @@ _SERVICE_KEYWORDS: tuple[str, ...] = (
     "soporte técnico",
     "linea de atencion",
     "línea de atención",
+    "horario de atencion",
+    "horario de atención",
     "nuestro telefono",
     "nuestro número",
     "sucursal",
     "showroom",
+)
+
+# Contexto de pie de página corporativo/marketing: los números que aparecen
+# ahí son de la empresa. En los 5 sujetos, los FP de móvil más repetidos
+# (p. ej. +56 9 6194 1240 ×11) venían de footers con estas señales.
+_FOOTER_KEYWORDS: tuple[str, ...] = (
+    "derechos reservados",
+    "cancelar suscripcion",
+    "cancelar la suscripcion",
+    "unsubscribe",
+    "darte de baja",
+    "dar de baja",
+    "siguenos",
+    "siganos",
+    "no respondas este correo",
+    "no responder este correo",
+    "correo generado automaticamente",
 )
 
 # Si el número aparece pegado a estos tokens es casi seguro que NO es teléfono.
@@ -229,6 +251,12 @@ def extract_chilean_phone_matches_with_context(
 
         score = _score_phone(raw, normalized, line, window, prefix)
         score += _cross_validate(window, nearby_addresses, nearby_names, boost_if_near_address, boost_if_near_name)
+        # Fijos: exigir etiqueta personal explícita (0/89 confirmados sin ella
+        # en la evaluación con 5 sujetos — todos eran fonos de la empresa).
+        if normalized.startswith("+56 2") and not _has_personal_label(
+            _nt(line), _nt(window), _nt(prefix)
+        ):
+            continue
         if score < _min_score(normalized):
             continue
 
@@ -363,7 +391,34 @@ def _score_phone(raw: str, normalized: str, line: str, window: str, prefix: str)
             score -= 5
             break
 
+    # Pie de página corporativo/marketing → penalizar
+    for phrase in _FOOTER_KEYWORDS:
+        if phrase in nw:
+            score -= 5
+            break
+
     return score
+
+
+def _has_personal_label(line: str, window: str, prefix: str) -> bool:
+    """True si hay una etiqueta personal/posesiva explícita para el número.
+
+    Los teléfonos fijos requieren esta señal: en la evaluación con 5 sujetos,
+    los 89 fijos detectados eran números de contacto de las empresas (0%
+    confirmados contra el perfil real), mientras que los fijos personales
+    reales siempre aparecen etiquetados ("tu teléfono", "teléfono del titular").
+    """
+    for phrase in _LABEL_PHRASES:
+        if phrase in line or phrase in window:
+            return True
+    # Etiqueta inmediatamente antes con calificador personal explícito
+    if re.search(
+        r"(?:telefono|celular|fono|movil)\s+(?:del?\s+)?"
+        r"(?:cliente|titular|destinatario|contacto)\s*[:\-–]?\s*$",
+        prefix,
+    ):
+        return True
+    return False
 
 
 def _cross_validate(

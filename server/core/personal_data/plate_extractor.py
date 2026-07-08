@@ -181,6 +181,24 @@ def _is_valid_plate_candidate(raw_value: str, normalized_value: str, window: str
             return False
 
     if _plate_format(normalized_value) == "modern":
+        # Las patentes chilenas modernas (post-2007, LLLL##) usan un alfabeto
+        # de consonantes: NUNCA contienen vocales. En los 5 sujetos, las 30
+        # patentes confirmadas son solo-consonantes y el único candidato con
+        # vocal era el FP "HORA17".
+        if re.search(r"[AEIOU]", normalized_value[:4]):
+            return False
+        # Palabra común escrita como prosa ("Hora 17", "Pago 56"): se rechaza
+        # SIEMPRE, incluso con marcador de patente en la ventana. En los 5
+        # sujetos, "HORA17" se capturó ×2 porque el correo de agendamiento
+        # mencionaba 'patente' en otra parte. Una patente real se escribe en
+        # mayúsculas y sin espacio entre letras y dígitos.
+        word_like = (
+            raw_letters.lower() in COMMON_NON_PLATE_WORDS
+            or _looks_like_common_word(raw_letters)
+        )
+        written_as_plate = raw_letters.isupper() and not re.search(r"\s", raw_value)
+        if word_like and not written_as_plate:
+            return False
         if raw_letters.lower() in COMMON_NON_PLATE_WORDS and not has_explicit_marker:
             return False
         if not raw_letters.isupper() and not has_explicit_marker:
